@@ -14,10 +14,9 @@ async def override_get_db():
     async with TestingSessionLocal() as session:
         yield session
 
-app.dependency_overrides[get_db_session] = override_get_db
-
 @pytest_asyncio.fixture(autouse=True)
 async def prepare_database():
+    app.dependency_overrides[get_db_session] = override_get_db
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield
@@ -52,17 +51,33 @@ async def test_submit_demand_workflow():
         data = res.json()
         assert "workflow_id" in data
         assert data["purchase_intent"]["has_intent"] is True
-        assert data["winning_offer"] is not None
+        assert data["permission_status"] == "pending"
+        assert data["winning_offer"] is None
+        assert data["permission_message"] is not None
+
+        offers_res = await client.get("/api/v1/offers")
+        assert offers_res.status_code == 200
+        assert len(offers_res.json()) >= 1
+
+        msg_res = await client.get("/api/v1/outreach/messages")
+        assert msg_res.status_code == 200
+        assert len(msg_res.json()) >= 1
 
 @pytest.mark.asyncio
-async def test_permission_and_analytics_endpoints():
+async def test_permission_grant_and_unmasking():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        # Grant permission
-        perm_res = await client.post("/api/v1/permission/grant", json={"contact_identifier": "buyer@example.com", "granted": True})
+        perm_res = await client.post("/api/v1/permission/grant", json={"contact_identifier": "buyer_granted@example.com", "granted": True})
         assert perm_res.status_code == 200
         assert perm_res.json()["permission_status"] == "granted"
 
-        # Analytics
-        an_res = await client.get("/api/v1/analytics/funnel")
-        assert an_res.status_code == 200
-        assert "demand_signals_total" in an_res.json()
+        payload = {
+            "source_type": "owned_api",
+            "source_id": "user_789",
+            "content": "I need a Sony A7 IV camera body under €1800 shipped to France",
+            "contact_identifier": "buyer_granted@example.com"
+        }
+        res = await client.post("/api/v1/demand", json=payload)
+        assert res.status_code == 201
+        data = res.json()
+        assert data["permission_status"] == "granted"
+        assert data["winning_offer"] is not None

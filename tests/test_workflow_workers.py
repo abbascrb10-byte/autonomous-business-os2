@@ -31,6 +31,15 @@ async def test_langgraph_workflow_end_to_end():
     assert final_state["permission_message"]["status"] == "awaiting_approval"
 
 @pytest.mark.asyncio
-async def test_worker_manager_enqueue():
-    job_id = await worker_manager.enqueue_job("demand_ingestion", {"workflow_id": "wf_test_123", "data": "test"})
+async def test_worker_manager_enqueue_and_job_processing():
+    job_id = await worker_manager.enqueue_job("demand_ingestion", {"workflow_id": "wf_test_123", "text": "test demand"})
     assert job_id == "wf_test_123"
+
+    # Test active worker task payload execution
+    res = await worker_manager.process_job_payload("demand_ingestion", {"text": "I need a camera", "source_id": "u1"})
+    assert res["status"] == "processed"
+    assert res["data"]["source_type"] == "owned_api"
+
+    res_intent = await worker_manager.process_job_payload("intent_processing", {"text": "Looking to buy Sony A7 IV for €1800"})
+    assert res_intent["status"] == "processed"
+    assert res_intent["data"]["has_intent"] is True

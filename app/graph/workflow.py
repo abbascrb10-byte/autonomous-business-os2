@@ -57,7 +57,6 @@ async def node_normalize(state: WorkflowState) -> WorkflowState:
     return state
 
 async def node_deduplicate(state: WorkflowState) -> WorkflowState:
-    # Deduplication check flag in state (DB persistence level handles unique constraint)
     state["is_duplicate"] = False
     return state
 
@@ -76,7 +75,6 @@ async def node_intent(state: WorkflowState) -> WorkflowState:
     return state
 
 async def node_product(state: WorkflowState) -> WorkflowState:
-    # Normalize product requirements schema
     req = state.get("product_requirement", {})
     if not req.get("product_name"):
         req["product_name"] = state.get("normalized_demand", {}).get("raw_content", "General Product")
@@ -131,10 +129,10 @@ async def node_permission(state: WorkflowState) -> WorkflowState:
     contact = state.get("contact_identifier", "anonymous@gpie.internal")
     prod = state.get("product_requirement", {}).get("product_name", "product")
 
-    # Generate first-contact permission request
     perm_msg = outreach_service.generate_permission_request(contact, prod)
     state["permission_message"] = perm_msg
-    state["permission_status"] = "pending" # Initial status is pending approval
+    if "permission_status" not in state or not state["permission_status"]:
+        state["permission_status"] = "pending"
     return state
 
 async def node_recommendation(state: WorkflowState) -> WorkflowState:
@@ -153,7 +151,6 @@ async def node_recommendation(state: WorkflowState) -> WorkflowState:
         state["tracking_url"] = url
         state["recommendation_message"] = rec_msg
     else:
-        # Held at permission/approval boundary
         state["recommendation_message"] = None
 
     return state
@@ -162,7 +159,6 @@ async def node_tracking(state: WorkflowState) -> WorkflowState:
     logger.info("GPIE Workflow state tracking completed", workflow_id=state.get("workflow_id"))
     return state
 
-# Routing logic
 def route_after_intent(state: WorkflowState) -> str:
     intent = state.get("purchase_intent", {})
     if intent.get("is_qualified", False):
@@ -174,7 +170,6 @@ def route_after_policy(state: WorkflowState) -> str:
         return "permission"
     return "END"
 
-# Build LangGraph Workflow
 def build_gpie_graph() -> StateGraph:
     workflow = StateGraph(WorkflowState)
 

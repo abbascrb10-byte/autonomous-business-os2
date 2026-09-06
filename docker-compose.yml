@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -55,6 +53,23 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
+
+  worker:
+    build: .
+    container_name: gpie-worker
+    restart: always
+    command: ["python", "-m", "app.workers.runner"]
+    environment:
+      - APP_NAME=GPIE Worker
+      - APP_ENV=production
+      - DATABASE_URL=postgresql+asyncpg://gpie:gpie_password@postgres:5432/gpie_db
+      - SYNC_DATABASE_URL=postgresql://gpie:gpie_password@postgres:5432/gpie_db
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   postgres_data:
