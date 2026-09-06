@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: gpie-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: gpie
+      POSTGRES_PASSWORD: gpie_password
+      POSTGRES_DB: gpie_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gpie -d gpie_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: gpie-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: gpie-app
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=GPIE Professional v1
+      - APP_ENV=production
+      - DATABASE_URL=postgresql+asyncpg://gpie:gpie_password@postgres:5432/gpie_db
+      - SYNC_DATABASE_URL=postgresql://gpie:gpie_password@postgres:5432/gpie_db
+      - REDIS_URL=redis://redis:6379/0
+      - AI_PROVIDER=openai
+      - OUTREACH_PROVIDER=local_approval
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  postgres_data:

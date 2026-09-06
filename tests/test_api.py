@@ -1,0 +1,68 @@
+import pytest
+import pytest_asyncio
+from httpx import AsyncClient, ASGITransport
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from app.main import app
+from app.database.session import Base, get_db_session
+
+TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+
+engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+TestingSessionLocal = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+
+async def override_get_db():
+    async with TestingSessionLocal() as session:
+        yield session
+
+app.dependency_overrides[get_db_session] = override_get_db
+
+@pytest_asyncio.fixture(autouse=True)
+async def prepare_database():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+
+@pytest.mark.asyncio
+async def test_health_check_endpoint():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.get("/health")
+        assert res.status_code == 200
+        assert res.json()["service"] == "GPIE Professional v1"
+
+@pytest.mark.asyncio
+async def test_readiness_check_endpoint():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.get("/readiness")
+        assert res.status_code == 200
+        assert "database" in res.json()
+
+@pytest.mark.asyncio
+async def test_submit_demand_workflow():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        payload = {
+            "source_type": "owned_api",
+            "source_id": "user_456",
+            "content": "I need a Sony A7 IV camera body under €1800 shipped to France",
+            "contact_identifier": "buyer_test@example.com"
+        }
+        res = await client.post("/api/v1/demand", json=payload)
+        assert res.status_code == 201
+        data = res.json()
+        assert "workflow_id" in data
+        assert data["purchase_intent"]["has_intent"] is True
+        assert data["winning_offer"] is not None
+
+@pytest.mark.asyncio
+async def test_permission_and_analytics_endpoints():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # Grant permission
+        perm_res = await client.post("/api/v1/permission/grant", json={"contact_identifier": "buyer@example.com", "granted": True})
+        assert perm_res.status_code == 200
+        assert perm_res.json()["permission_status"] == "granted"
+
+        # Analytics
+        an_res = await client.get("/api/v1/analytics/funnel")
+        assert an_res.status_code == 200
+        assert "demand_signals_total" in an_res.json()
