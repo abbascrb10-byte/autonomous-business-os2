@@ -18,6 +18,17 @@ class RedisWorkerManager:
         self.redis_url = settings.REDIS_URL
         self._redis: Optional[aioredis.Redis] = None
         self._is_worker_running = False
+        self._local_queues: Dict[str, list[Dict[str, Any]]] = {}
+
+    async def redis_is_ready(self) -> bool:
+        redis = await self.get_redis()
+        if not redis:
+            return False
+        try:
+            await redis.ping()
+            return True
+        except Exception:
+            return False
 
     async def get_redis(self) -> Optional[aioredis.Redis]:
         if self._redis is None:
@@ -51,6 +62,10 @@ class RedisWorkerManager:
                 logger.info("Enqueued job to Redis queue", queue=queue_name, job_id=job_id)
             except Exception as e:
                 logger.error("Failed to enqueue job to Redis", error=str(e))
+                self._local_queues.setdefault(queue_name, []).append(payload)
+        else:
+            self._local_queues.setdefault(queue_name, []).append(payload)
+            logger.warning("Enqueued job to local fallback queue", queue=queue_name, job_id=job_id)
         return job_id
 
     async def process_job_payload(self, queue_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -106,7 +121,21 @@ class RedisWorkerManager:
         """
         redis = await self.get_redis()
         if not redis:
-            logger.info("Redis offline: skipping active Redis consumer loop")
+            logger.info("Redis offline: consuming local fallback queue", queue=queue_name)
+            self._is_worker_running = True
+            jobs_processed = 0
+            while self._is_worker_running:
+                queue = self._local_queues.setdefault(queue_name, [])
+                if queue:
+                    payload = queue.pop(0)
+                    await self.process_job_payload(queue_name, payload)
+                    jobs_processed += 1
+                    if max_jobs and jobs_processed >= max_jobs:
+                        break
+                elif max_jobs is not None:
+                    break
+                else:
+                    await asyncio.sleep(0.5)
             return
 
         self._is_worker_running = True

@@ -6,6 +6,8 @@ from app.main import app
 from app.database.session import Base, get_db_session
 from app.config.settings import settings
 
+ADMIN_HEADERS = {"X-API-Key": settings.ADMIN_API_KEY or ""}
+
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
 engine = create_async_engine(TEST_DATABASE_URL, echo=False)
@@ -30,6 +32,17 @@ async def test_health_check_endpoint():
         res = await client.get("/health")
         assert res.status_code == 200
         assert res.json()["service"] == "GPIE Professional v1"
+
+@pytest.mark.asyncio
+async def test_ui_dashboard_renders_operational_sections():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.get("/ui")
+        assert res.status_code == 200
+        assert "لوحة تشغيل GPIE" in res.text
+        assert "حالة مفاتيح التكامل" in res.text
+        assert "مسارات API المتاحة" in res.text
+        assert "آخر 10 إشارات واردة" in res.text
+        assert "/api/v1/demand" in res.text
 
 @pytest.mark.asyncio
 async def test_readiness_check_endpoint():
@@ -71,17 +84,17 @@ async def test_submit_demand_workflow():
         assert data["winning_offer"] is None
         assert data["permission_message"] is not None
 
-        offers_res = await client.get("/api/v1/offers")
+        offers_res = await client.get("/api/v1/offers", headers=ADMIN_HEADERS)
         assert offers_res.status_code == 200
 
-        msg_res = await client.get("/api/v1/outreach/messages")
+        msg_res = await client.get("/api/v1/outreach/messages", headers=ADMIN_HEADERS)
         assert msg_res.status_code == 200
         assert len(msg_res.json()) >= 1
 
 @pytest.mark.asyncio
 async def test_permission_grant_and_unmasking():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        perm_res = await client.post("/api/v1/permission/grant", json={"contact_identifier": "buyer_granted@example.com", "granted": True})
+        perm_res = await client.post("/api/v1/permission/grant", json={"contact_identifier": "buyer_granted@example.com", "granted": True}, headers=ADMIN_HEADERS)
         assert perm_res.status_code == 200
         assert perm_res.json()["permission_status"] == "granted"
 

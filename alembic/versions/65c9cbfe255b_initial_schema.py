@@ -203,6 +203,8 @@ def upgrade() -> None:
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint('id')
     )
+    op.create_index('ix_events_entity_type', 'events', ['entity_type'])
+    op.create_index('ix_events_entity_id', 'events', ['entity_id'])
 
     op.create_table(
         'agent_runs',
@@ -217,6 +219,7 @@ def upgrade() -> None:
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint('id')
     )
+    op.create_index('ix_agent_runs_workflow_id', 'agent_runs', ['workflow_id'])
 
     op.create_table(
         'audit_logs',

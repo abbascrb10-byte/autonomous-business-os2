@@ -1,5 +1,6 @@
 import os
 from typing import Optional
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -53,6 +54,7 @@ class Settings(BaseSettings):
     EBAY_CLIENT_ID: Optional[str] = None
     EBAY_CLIENT_SECRET: Optional[str] = None
     EBAY_CAMPAIGN_ID: Optional[str] = None
+    EBAY_API_BASE_URL: str = "https://api.ebay.com"
 
     # Etsy Open API v3
     ETSY_API_KEY: Optional[str] = None
@@ -70,5 +72,16 @@ class Settings(BaseSettings):
 
     # Tracking
     BASE_TRACKING_URL: str = "http://localhost:8000/api/v1/tracking/click"
+
+    @model_validator(mode="after")
+    def validate_production_security(self):
+        if self.APP_ENV == "production":
+            if not self.ADMIN_API_KEY:
+                raise ValueError("ADMIN_API_KEY must be configured in production")
+            if self.SECRET_KEY == "dev_secret_key_change_in_production":
+                raise ValueError("SECRET_KEY must be changed in production")
+            if self.DEBUG:
+                raise ValueError("DEBUG must be false in production")
+        return self
 
 settings = Settings()

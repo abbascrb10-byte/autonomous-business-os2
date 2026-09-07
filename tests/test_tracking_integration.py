@@ -5,6 +5,9 @@ from app.main import app
 from app.database.session import Base, get_db_session
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from app.merchants.adapters import ebay_adapter
+from app.config.settings import settings
+
+ADMIN_HEADERS = {"X-API-Key": settings.ADMIN_API_KEY or ""}
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -43,7 +46,7 @@ async def test_full_tracking_and_conversion_idempotency_api(monkeypatch):
     monkeypatch.setattr(ebay_adapter, "discover_offers", discover_test_offers)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # Grant permission first to unmask winning offer and ensure offer creation
-        await client.post("/api/v1/permission/grant", json={"contact_identifier": "buyer_conv@example.com", "granted": True})
+        await client.post("/api/v1/permission/grant", json={"contact_identifier": "buyer_conv@example.com", "granted": True}, headers=ADMIN_HEADERS)
 
         demand_res = await client.post("/api/v1/demand", json={
             "source_type": "owned_api",
@@ -68,19 +71,19 @@ async def test_full_tracking_and_conversion_idempotency_api(monkeypatch):
             "amount": 1800.0,
             "currency": "EUR"
         }
-        conv_res = await client.post("/api/v1/tracking/conversion", json=conv_payload)
+        conv_res = await client.post("/api/v1/tracking/conversion", json=conv_payload, headers=ADMIN_HEADERS)
         assert conv_res.status_code == 200
         assert conv_res.json()["status"] == "recorded"
 
-        dup_res = await client.post("/api/v1/tracking/conversion", json=conv_payload)
+        dup_res = await client.post("/api/v1/tracking/conversion", json=conv_payload, headers=ADMIN_HEADERS)
         assert dup_res.status_code == 200
         assert dup_res.json()["status"] == "already_processed"
 
-        funnel_res = await client.get("/api/v1/analytics/funnel")
+        funnel_res = await client.get("/api/v1/analytics/funnel", headers=ADMIN_HEADERS)
         assert funnel_res.status_code == 200
         assert funnel_res.json()["conversions_total"] == 1
 
-        learning_res = await client.get("/api/v1/learning/metrics")
+        learning_res = await client.get("/api/v1/learning/metrics", headers=ADMIN_HEADERS)
         assert learning_res.status_code == 200
         assert learning_res.json()["total_learning_events"] >= 1
 
@@ -96,5 +99,5 @@ async def test_unknown_tracking_token_is_rejected():
             "merchant_name": "ebay",
             "amount": 10.0,
             "currency": "EUR"
-        })
+        }, headers=ADMIN_HEADERS)
         assert conversion_res.status_code == 404

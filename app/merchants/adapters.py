@@ -43,7 +43,7 @@ class EbayMerchantAdapter(BaseMerchantAdapter):
         return bool(settings.EBAY_CLIENT_ID and settings.EBAY_CLIENT_SECRET)
 
     async def _get_oauth_token(self) -> Optional[str]:
-        url = "https://api.ebay.com/identity/v1/oauth2/token"
+        url = f"{settings.EBAY_API_BASE_URL.rstrip('/')}/identity/v1/oauth2/token"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         data = {"grant_type": "client_credentials", "scope": "https://api.ebay.com/oauth/api_scope"}
         try:
@@ -71,7 +71,7 @@ class EbayMerchantAdapter(BaseMerchantAdapter):
 
             marketplace_id = getattr(settings, "EBAY_MARKETPLACE_ID", "EBAY_US")
 
-            url = "https://api.ebay.com/buy/browse/v1/item_summary/search"
+            url = f"{settings.EBAY_API_BASE_URL.rstrip('/')}/buy/browse/v1/item_summary/search"
             params = {"q": product_query, "limit": "5"}
             headers = {
                 "Authorization": f"Bearer {token}",

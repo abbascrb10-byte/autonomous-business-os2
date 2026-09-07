@@ -40,6 +40,7 @@ services:
     environment:
       - APP_NAME=GPIE Professional v1
       - APP_ENV=production
+      - DEBUG=false
       - DATABASE_URL=postgresql+asyncpg://gpie:gpie_password@postgres:5432/gpie_db
       - SYNC_DATABASE_URL=postgresql://gpie:gpie_password@postgres:5432/gpie_db
       - REDIS_URL=redis://redis:6379/0

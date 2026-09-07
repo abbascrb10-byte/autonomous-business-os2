@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.database.session import get_db_session
+from app.config.settings import settings
 from app.database.models import (
     DemandSignal, PurchaseIntent, ProductRequirement, Merchant, Offer,
     Contact, OutreachMessage, Click, Conversion, Commission, AgentRun, AuditLog, LearningOutcome
@@ -22,6 +23,7 @@ from app.policy.engine import policy_engine
 from app.agents.llm_provider import llm_provider
 from app.merchants.adapters import amazon_adapter, ebay_adapter, etsy_adapter
 from app.sources.registry import source_registry
+from app.workers.manager import worker_manager
 from app.api.auth import check_rate_limit, verify_admin_api_key
 
 router = APIRouter()
@@ -75,9 +77,14 @@ async def readiness_check(session: AsyncSession = Depends(get_db_session)):
     except Exception:
         db_ready = False
 
+    redis_ready = await worker_manager.redis_is_ready()
+    ready = db_ready and redis_ready
+
     return {
-        "status": "ready" if db_ready else "degraded",
+        "status": "ready" if ready else "degraded",
         "database": db_ready,
+        "redis": redis_ready,
+        "admin_api_key_configured": bool(settings.ADMIN_API_KEY),
         "ai_provider_configured": llm_provider.is_configured,
         "merchants": {
             "amazon": amazon_adapter.is_configured,
