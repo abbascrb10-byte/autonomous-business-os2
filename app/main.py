@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from app.config.settings import settings
 from app.api.routes import router as api_router
+from app.api.dashboard import router as dashboard_router
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -10,6 +11,7 @@ app = FastAPI(
 )
 
 app.include_router(api_router)
+app.include_router(dashboard_router)
 
 if __name__ == "__main__":
     import uvicorn

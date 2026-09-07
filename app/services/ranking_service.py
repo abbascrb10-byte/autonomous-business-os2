@@ -1,6 +1,7 @@
 from typing import Dict, Any, List, Tuple
 from datetime import datetime, timezone
 from app.agents.llm_provider import llm_provider
+from app.services.currency_service import currency_service
 import structlog
 
 logger = structlog.get_logger()
@@ -8,26 +9,35 @@ logger = structlog.get_logger()
 class RankingService:
     """
     Verifies and ranks commercial offers based on product match, model fit, price suitability,
-    seller trust signals, availability, shipping, freshness, and affiliate weight.
+    total cost (price + shipping converted to normalized currency), seller trust signals, availability,
+    freshness, and affiliate weight.
     Buyer suitability is strictly prioritized over commission rate.
     """
 
     def verify_offer(self, offer: Dict[str, Any], requirement: Dict[str, Any]) -> Tuple[bool, str]:
         """
         Verifies that an offer is eligible and valid against buyer requirements.
-        Checks price <= budget_max, availability, valid URL, and currency.
+        Checks price <= budget_max, total cost in normalized currency, availability, valid URL.
         """
         url = offer.get("url") or offer.get("affiliate_url")
-        if not url:
-            return False, "Offer is missing destination URL"
+        if not url or not (url.startswith("http://") or url.startswith("https://")):
+            return False, "Offer is missing valid HTTP/HTTPS destination URL"
 
         price = offer.get("price")
         if price is None or price <= 0:
-            return False, "Offer has invalid price"
+            return False, "Offer has invalid or non-positive price"
+
+        offer_currency = offer.get("currency", "EUR")
+        shipping_cost = offer.get("shipping_cost") or 0.0
+        total_cost_orig = currency_service.calculate_total_cost(price, shipping_cost)
+        total_cost_eur = currency_service.normalize_to_eur(total_cost_orig, offer_currency)
 
         budget_max = requirement.get("budget_max")
-        if budget_max and price > budget_max * 1.05:
-            return False, f"Offer price ({price}) exceeds budget max ({budget_max})"
+        req_currency = requirement.get("currency", "EUR")
+        if budget_max:
+            budget_max_eur = currency_service.normalize_to_eur(budget_max, req_currency)
+            if total_cost_eur > budget_max_eur * 1.05:
+                return False, f"Total cost ({total_cost_eur} EUR) exceeds budget max ({budget_max_eur} EUR)"
 
         if not offer.get("availability", True):
             return False, "Offer is currently unavailable"
@@ -40,7 +50,8 @@ class RankingService:
         Sets is_verified=True ONLY after verification rules pass.
         """
         budget_max = requirement.get("budget_max") or 1000.0
-        product_req = requirement.get("product_name") or ""
+        req_currency = requirement.get("currency", "EUR")
+        budget_max_eur = currency_service.normalize_to_eur(budget_max, req_currency)
 
         ranked_offers = []
 
@@ -53,8 +64,12 @@ class RankingService:
             product_match_score = float(llm_eval.get("match_score", 0.5))
 
             offer_price = offer.get("price", budget_max)
-            if offer_price <= budget_max:
-                price_score = 1.0 - (offer_price / (budget_max * 1.5))
+            shipping_cost = offer.get("shipping_cost") or 0.0
+            offer_currency = offer.get("currency", "EUR")
+            total_cost_eur = currency_service.normalize_to_eur(currency_service.calculate_total_cost(offer_price, shipping_cost), offer_currency)
+
+            if total_cost_eur <= budget_max_eur:
+                price_score = 1.0 - (total_cost_eur / (budget_max_eur * 1.5))
             else:
                 price_score = 0.2
 
@@ -64,7 +79,7 @@ class RankingService:
             elif seller:
                 seller_trust = 0.75
             else:
-                seller_trust = 0.50 # Neutral default when seller name unknown
+                seller_trust = 0.50
 
             merchant_name = offer.get("merchant_name", "").lower()
             affiliate_weight = 0.08 if merchant_name == "amazon" else 0.06
@@ -79,14 +94,15 @@ class RankingService:
 
             win_rationale = (
                 f"Rank score: {rank_score}. Match: {product_match_score:.2f}, Price fit: {price_score:.2f}, "
-                f"Seller trust: {seller_trust:.2f}. Verification: {verify_msg}."
+                f"Seller trust: {seller_trust:.2f}, Total Cost: {total_cost_eur} EUR. Verification: {verify_msg}."
             )
 
             offer_copy = dict(offer)
             offer_copy["product_match_score"] = product_match_score
             offer_copy["rank_score"] = rank_score
+            offer_copy["total_cost_eur"] = total_cost_eur
             offer_copy["win_rationale"] = win_rationale
-            offer_copy["is_verified"] = True # Set verified True only after verification pass
+            offer_copy["is_verified"] = True
 
             ranked_offers.append(offer_copy)
 

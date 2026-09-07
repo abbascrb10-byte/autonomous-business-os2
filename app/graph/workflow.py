@@ -1,9 +1,7 @@
 import uuid
 from typing import TypedDict, List, Dict, Any, Optional
 from langgraph.graph import StateGraph, END
-from app.sources.adapters import owned_adapter, public_adapter, search_adapter, tavily_adapter
-from app.sources.reddit_adapter import reddit_adapter
-from app.sources.twitter_adapter import twitter_adapter
+from app.sources.registry import source_registry
 from app.services.intent_service import intent_service
 from app.merchants.adapters import ebay_adapter, etsy_adapter, amazon_adapter
 from app.services.ranking_service import ranking_service
@@ -39,18 +37,7 @@ class WorkflowState(TypedDict, total=False):
 async def node_ingest(state: WorkflowState) -> WorkflowState:
     raw = state.get("raw_demand", {})
     stype = raw.get("source_type", "owned_api")
-    if stype == "authorized_public":
-        adapter = public_adapter
-    elif stype == "commercial_search":
-        adapter = search_adapter
-    elif stype == "tavily_search":
-        adapter = tavily_adapter
-    elif stype == "reddit":
-        adapter = reddit_adapter
-    elif stype == "twitter":
-        adapter = twitter_adapter
-    else:
-        adapter = owned_adapter
+    adapter = source_registry.get_adapter(stype)
 
     norm = adapter.normalize_demand(raw)
     state["normalized_demand"] = norm

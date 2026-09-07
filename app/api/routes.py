@@ -1,6 +1,6 @@
 import uuid
 from typing import Dict, Any, Optional, List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -20,15 +20,16 @@ from app.learning.service import learning_service
 from app.policy.engine import policy_engine
 from app.agents.llm_provider import llm_provider
 from app.merchants.adapters import amazon_adapter, ebay_adapter
-from app.sources.adapters import owned_adapter, public_adapter, search_adapter
+from app.sources.registry import source_registry
 from app.workers.manager import worker_manager
+from app.api.auth import check_rate_limit, verify_admin_api_key
 
 router = APIRouter()
 
 # --- Request / Response Schemas ---
 
 class DemandIngestRequest(BaseModel):
-    source_type: str = Field(default="owned_api", description="Source type: owned_api, authorized_public, commercial_search")
+    source_type: str = Field(default="owned_api", description="Source type: owned_api, authorized_public, commercial_search, tavily_search, reddit, twitter")
     source_id: str = Field(default="user_123", description="Identifier for demand source")
     content: str = Field(..., description="Raw demand text")
     contact_identifier: Optional[str] = Field(default=None, description="Email or user handle")
@@ -81,7 +82,9 @@ async def readiness_check(session: AsyncSession = Depends(get_db_session)):
     }
 
 @router.post("/api/v1/demand", status_code=status.HTTP_201_CREATED)
-async def submit_demand(req: DemandIngestRequest, session: AsyncSession = Depends(get_db_session)):
+async def submit_demand(request: Request, req: DemandIngestRequest, session: AsyncSession = Depends(get_db_session)):
+    await check_rate_limit(request)
+
     # 1. Policy check
     ok, reason = policy_engine.evaluate_source_policy(req.source_type, req.metadata or {})
 
@@ -100,14 +103,7 @@ async def submit_demand(req: DemandIngestRequest, session: AsyncSession = Depend
         raise HTTPException(status_code=400, detail=f"Policy rejection: {reason}")
 
     # 2. Compute dedup hash and check PostgreSQL for duplicate
-    stype = req.source_type
-    if stype == "authorized_public":
-        adapter = public_adapter
-    elif stype == "commercial_search":
-        adapter = search_adapter
-    else:
-        adapter = owned_adapter
-
+    adapter = source_registry.get_adapter(req.source_type)
     norm_preview = adapter.normalize_demand({
         "source_type": req.source_type,
         "source_id": req.source_id,
@@ -198,7 +194,6 @@ async def submit_demand(req: DemandIngestRequest, session: AsyncSession = Depend
         )
         session.add(prod_model)
 
-    # Persist Discovered & Ranked Offers into PostgreSQL
     persisted_offers = []
     winning_offer_model = None
     ranked_offers_data = final_state.get("ranked_offers", [])
@@ -356,13 +351,30 @@ async def list_outreach_messages(session: AsyncSession = Depends(get_db_session)
     ]
 
 @router.get("/api/v1/tracking/click/{tracking_id}")
-async def track_click(tracking_id: str, session: AsyncSession = Depends(get_db_session)):
+async def track_click(tracking_id: str, request: Request, session: AsyncSession = Depends(get_db_session)):
+    await check_rate_limit(request)
+
     stmt = select(Click).options(selectinload(Click.offer)).where(Click.tracking_token == tracking_id)
     click_model = (await session.execute(stmt)).scalar_one_or_none()
 
     if not click_model:
-        offer_stmt = select(Offer).order_by(Offer.created_at.desc())
-        latest_offer = (await session.execute(offer_stmt)).scalars().first()
+        # Check AgentRun state_data for tracking_token
+        agent_stmt = select(AgentRun).order_by(AgentRun.created_at.desc())
+        agent_runs = (await session.execute(agent_stmt)).scalars().all()
+
+        target_offer_id = None
+        for run in agent_runs:
+            state_data = run.state_data or {}
+            if state_data.get("tracking_token") == tracking_id:
+                target_offer_id = state_data.get("winning_offer_id")
+                break
+
+        if target_offer_id:
+            offer_stmt = select(Offer).where(Offer.id == target_offer_id)
+            latest_offer = (await session.execute(offer_stmt)).scalar_one_or_none()
+        else:
+            offer_stmt = select(Offer).order_by(Offer.created_at.desc())
+            latest_offer = (await session.execute(offer_stmt)).scalars().first()
 
         if not latest_offer:
             dummy_merchant = await _get_or_create_merchant(session, "ebay")
@@ -371,7 +383,7 @@ async def track_click(tracking_id: str, session: AsyncSession = Depends(get_db_s
                 has_intent=True,
                 confidence_score=0.9,
                 intent_stage="ready_to_buy",
-                scoring_rationale="Tracking fallback intent",
+                scoring_rationale="Tracked click offer",
                 is_qualified=True
             )
             session.add(dummy_intent)
@@ -380,14 +392,14 @@ async def track_click(tracking_id: str, session: AsyncSession = Depends(get_db_s
             latest_offer = Offer(
                 purchase_intent_id=dummy_intent.id,
                 merchant_id=dummy_merchant.id,
-                title="Default Offer Listing",
-                external_product_id="EXT-DEFAULT-OFFER",
+                title="Tracked Listing Offer",
+                external_product_id=f"EXT-TRK-{uuid.uuid4().hex[:8]}",
                 price=100.0,
                 currency="EUR",
-                url="https://example.com/item",
+                url="https://example.com/tracked_item",
                 availability=True,
                 is_verified=True,
-                is_test_offer=False
+                is_test_offer=True
             )
             session.add(latest_offer)
             await session.flush()
@@ -396,8 +408,8 @@ async def track_click(tracking_id: str, session: AsyncSession = Depends(get_db_s
             tracking_token=tracking_id,
             offer_id=latest_offer.id,
             purchase_intent_id=latest_offer.purchase_intent_id,
-            ip_address="127.0.0.1",
-            user_agent="GPIE-Client/1.0"
+            ip_address=request.client.host if request.client else "127.0.0.1",
+            user_agent=request.headers.get("User-Agent", "GPIE-Client/1.0")
         )
         session.add(click_model)
 
@@ -421,7 +433,9 @@ async def track_click(tracking_id: str, session: AsyncSession = Depends(get_db_s
     }
 
 @router.post("/api/v1/tracking/conversion")
-async def record_conversion(req: ConversionRecordRequest, session: AsyncSession = Depends(get_db_session)):
+async def record_conversion(request: Request, req: ConversionRecordRequest, session: AsyncSession = Depends(get_db_session)):
+    await check_rate_limit(request)
+
     stmt = select(Conversion).where(Conversion.external_conversion_id == req.external_conversion_id)
     existing = (await session.execute(stmt)).scalar_one_or_none()
     if existing:
@@ -483,6 +497,8 @@ async def record_conversion(req: ConversionRecordRequest, session: AsyncSession 
     session.add(learning_entry)
 
     await session.commit()
+
+    await learning_service.optimize_source_weights(session)
 
     return {
         "status": "recorded",
