@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     APP_ENV: str = "development"
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
+    CORS_ALLOWED_ORIGINS: str = ""
     SECRET_KEY: str = "dev_secret_key_change_in_production"
     ADMIN_API_KEY: Optional[str] = None
 

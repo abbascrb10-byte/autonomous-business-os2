@@ -17,6 +17,7 @@ async def test_ranking_service_verification_and_ranking():
             "merchant_name": "amazon",
             "title": "Sony Alpha 7 IV Full-frame Mirrorless Camera Body",
             "price": 1750.0,
+            "currency": "EUR",
             "availability": True,
             "seller_name": "Amazon Retail Verified",
             "url": "https://amazon.com/dp/123"
@@ -25,6 +26,7 @@ async def test_ranking_service_verification_and_ranking():
             "merchant_name": "ebay",
             "title": "Sony A7 IV Body Only Brand New",
             "price": 1650.0,
+            "currency": "EUR",
             "availability": True,
             "seller_name": "TopRatedSeller",
             "url": "https://ebay.com/itm/456"
@@ -33,6 +35,7 @@ async def test_ranking_service_verification_and_ranking():
             "merchant_name": "unknown",
             "title": "Sony Camera Overpriced",
             "price": 2500.0, # Exceeds budget max
+            "currency": "EUR",
             "availability": True,
             "seller_name": "Unknown Seller",
             "url": "https://example.com/789"

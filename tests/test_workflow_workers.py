@@ -28,6 +28,17 @@ async def test_langgraph_workflow_end_to_end():
     assert final_state["permission_message"]["status"] == "awaiting_approval"
 
 @pytest.mark.asyncio
+async def test_langgraph_duplicate_state_stops_before_intent():
+    final_state = await gpie_workflow.ainvoke({
+        "workflow_id": "duplicate-workflow",
+        "is_duplicate": True,
+        "raw_demand": {"source_type": "owned_api", "text": "duplicate"}
+    })
+
+    assert final_state["is_duplicate"] is True
+    assert "purchase_intent" not in final_state
+
+@pytest.mark.asyncio
 async def test_worker_manager_enqueue_and_job_processing():
     job_id = await worker_manager.enqueue_job("demand_ingestion", {"workflow_id": "wf_test_123", "text": "test demand"})
     assert job_id == "wf_test_123"

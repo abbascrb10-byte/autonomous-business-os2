@@ -47,6 +47,8 @@ class RedisWorkerManager:
                 return bool(await redis.set(f"lock:{lock_key}", "1", ex=ttl, nx=True))
             except Exception:
                 pass
+        if settings.APP_ENV == "production":
+            raise RuntimeError("Redis is required for production job locking")
         return True
 
     async def enqueue_job(self, queue_name: str, payload: Dict[str, Any], max_retries: int = 3) -> str:
@@ -56,6 +58,8 @@ class RedisWorkerManager:
         payload["max_retries"] = max_retries
 
         redis = await self.get_redis()
+        if not redis and settings.APP_ENV == "production":
+            raise RuntimeError("Redis is required for production job processing")
         if redis:
             try:
                 await redis.rpush(f"queue:{queue_name}", json.dumps(payload))
@@ -103,14 +107,19 @@ class RedisWorkerManager:
             logger.error("Error processing worker job", queue=queue_name, job_id=job_id, retry=retries, error=str(e))
             if retries < max_retries:
                 payload["retries"] = retries
+                await asyncio.sleep(min(2 ** retries, 30))
                 redis = await self.get_redis()
                 if redis:
                     await redis.rpush(f"queue:{queue_name}", json.dumps(payload))
+                elif settings.APP_ENV != "production":
+                    self._local_queues.setdefault(queue_name, []).append(payload)
             else:
                 logger.error("Job exceeded max retries, sending to dead-letter queue", queue=queue_name, job_id=job_id)
                 redis = await self.get_redis()
                 if redis:
                     await redis.rpush(f"dlq:{queue_name}", json.dumps(payload))
+                elif settings.APP_ENV != "production":
+                    self._local_queues.setdefault(f"dlq:{queue_name}", []).append(payload)
             return {"status": "failed", "error": str(e)}
 
         return {"status": "completed", "payload": payload}
@@ -121,6 +130,8 @@ class RedisWorkerManager:
         """
         redis = await self.get_redis()
         if not redis:
+            if settings.APP_ENV == "production":
+                raise RuntimeError("Redis is required for production worker startup")
             logger.info("Redis offline: consuming local fallback queue", queue=queue_name)
             self._is_worker_running = True
             jobs_processed = 0

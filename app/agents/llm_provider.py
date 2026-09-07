@@ -1,12 +1,32 @@
 import re
 import json
 import httpx
+from pydantic import BaseModel, Field, ValidationError
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 from app.config.settings import settings
 import structlog
 
 logger = structlog.get_logger()
+
+class IntentResult(BaseModel):
+    has_intent: bool
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    intent_stage: str
+    rationale: str
+
+class ProductRequirementResult(BaseModel):
+    product_name: str
+    brand: Optional[str] = None
+    model: Optional[str] = None
+    category: Optional[str] = None
+    budget_max: Optional[float] = Field(default=None, ge=0.0)
+    currency: str = Field(min_length=3, max_length=10)
+    condition: str
+    destination_country: Optional[str] = None
+    shipping_preferences: Optional[str] = None
+    specifications: Optional[Dict[str, Any]] = None
+    urgency: str
 
 class BaseLLMClient(ABC):
     """Common interface for all LLM provider clients."""
@@ -331,17 +351,35 @@ class LLMProvider:
         if self._client:
             res = await self._client.classify_intent(text)
             if res:
-                return res
+                try:
+                    validated = IntentResult.model_validate(res)
+                    return {**validated.model_dump(), "llm_used": True, "llm_status": "LLM_SUCCESS"}
+                except ValidationError as exc:
+                    logger.warning("LLM intent output validation failed", error=str(exc))
+                    fallback = self._deterministic_classify_intent(text)
+                    fallback.update({"llm_status": "FALLBACK_USED", "llm_error": "INVALID_LLM_OUTPUT"})
+                    return fallback
 
-        return self._deterministic_classify_intent(text)
+        fallback = self._deterministic_classify_intent(text)
+        fallback.update({"llm_status": "FALLBACK_USED", "llm_error": "LLM_FAILURE"})
+        return fallback
 
     async def extract_product_requirements(self, text: str) -> Dict[str, Any]:
         if self._client:
             res = await self._client.extract_product_requirements(text)
             if res:
-                return res
+                try:
+                    validated = ProductRequirementResult.model_validate(res)
+                    return {**validated.model_dump(), "llm_used": True, "llm_status": "LLM_SUCCESS"}
+                except ValidationError as exc:
+                    logger.warning("LLM requirement output validation failed", error=str(exc))
+                    fallback = self._deterministic_extract_requirements(text)
+                    fallback.update({"llm_status": "FALLBACK_USED", "llm_error": "INVALID_LLM_OUTPUT"})
+                    return fallback
 
-        return self._deterministic_extract_requirements(text)
+        fallback = self._deterministic_extract_requirements(text)
+        fallback.update({"llm_status": "FALLBACK_USED", "llm_error": "LLM_FAILURE"})
+        return fallback
 
     async def reason_offer_suitability(self, offer_title: str, offer_price: float, requirement: Dict[str, Any]) -> Dict[str, Any]:
         if self._client:
@@ -352,7 +390,8 @@ class LLMProvider:
         return {
             "match_score": self._deterministic_match_score(offer_title, requirement),
             "reasoning": "Deterministic pattern matching evaluation (LLM unavailable/unconfigured).",
-            "llm_used": False
+            "llm_used": False,
+            "llm_status": "FALLBACK_USED"
         }
 
     def _deterministic_classify_intent(self, text: str) -> Dict[str, Any]:

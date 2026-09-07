@@ -13,6 +13,7 @@ from app.database.models import (
     DemandSignal, PurchaseIntent, ProductRequirement, Merchant, Offer,
     Contact, OutreachMessage, Click, Conversion, Commission, AgentRun, AuditLog, LearningOutcome
 )
+from app.database.models import utc_now
 from app.graph.workflow import gpie_workflow
 from app.services.intent_service import intent_service
 from app.services.outreach_service import outreach_service
@@ -136,30 +137,27 @@ async def submit_demand(request: Request, req: DemandIngestRequest, session: Asy
             "dedup_hash": dedup_hash
         }
 
+    recent_stmt = select(DemandSignal.normalized_content).where(
+        DemandSignal.normalized_content.is_not(None)
+    ).order_by(DemandSignal.created_at.desc()).limit(1000)
+    recent_contents = [value for value in (await session.execute(recent_stmt)).scalars().all() if value]
+    if intent_service.is_duplicate(req.content, recent_contents):
+        return {
+            "workflow_id": None,
+            "status": "duplicate",
+            "message": "A similar demand signal was already processed",
+            "dedup_hash": dedup_hash
+        }
+
     # Check existing contact permission status
     contact_id_str = req.contact_identifier or "anonymous@gpie.internal"
     stmt_contact = select(Contact).where(Contact.identifier == contact_id_str)
     contact = (await session.execute(stmt_contact)).scalar_one_or_none()
     current_permission = contact.permission_status if contact else "pending"
 
-    # Run the workflow exactly once; background processing is handled separately.
+    # Reserve the unique demand before expensive workflow/external API work.
     wf_id = str(uuid.uuid4())
-    initial_state = {
-        "workflow_id": wf_id,
-        "permission_status": current_permission,
-        "raw_demand": {
-            "source_type": req.source_type,
-            "source_id": req.source_id,
-            "text": req.content,
-            "email": req.contact_identifier,
-            "metadata": req.metadata or {}
-        }
-    }
-
-    final_state = await gpie_workflow.ainvoke(initial_state)
-
-    # 5. Persist workflow state into PostgreSQL
-    norm = final_state.get("normalized_demand", {})
+    norm = norm_preview
     demand_model = DemandSignal(
         id=wf_id,
         source_type=norm.get("source_type", req.source_type),
@@ -169,9 +167,51 @@ async def submit_demand(request: Request, req: DemandIngestRequest, session: Asy
         dedup_hash=dedup_hash,
         contact_identifier=req.contact_identifier,
         metadata_json=req.metadata,
-        status="processed"
+        status="processing"
     )
     session.add(demand_model)
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        existing_demand = (await session.execute(dedup_stmt)).scalar_one_or_none()
+        if not existing_demand:
+            raise
+        return {
+            "workflow_id": existing_demand.id,
+            "status": "duplicate",
+            "message": "Demand signal already reserved or processed",
+            "dedup_hash": dedup_hash
+        }
+
+    # Run the workflow exactly once; background processing is handled separately.
+    initial_state = {
+        "workflow_id": wf_id,
+        "permission_status": current_permission,
+        "is_duplicate": False,
+        "raw_demand": {
+            "source_type": req.source_type,
+            "source_id": req.source_id,
+            "text": req.content,
+            "email": req.contact_identifier,
+            "metadata": req.metadata or {}
+        }
+    }
+
+    try:
+        final_state = await gpie_workflow.ainvoke(initial_state)
+    except Exception:
+        demand_model.status = "failed"
+        await session.commit()
+        raise
+
+    # 5. Persist workflow state into PostgreSQL
+    norm = final_state.get("normalized_demand", {})
+    demand_model.source_type = norm.get("source_type", req.source_type)
+    demand_model.source_id = norm.get("source_id", req.source_id)
+    demand_model.raw_content = norm.get("raw_content", req.content)
+    demand_model.normalized_content = norm.get("normalized_content", req.content)
+    demand_model.status = "processed"
 
     intent_data = final_state.get("purchase_intent", {})
     intent_model = PurchaseIntent(
@@ -355,10 +395,25 @@ async def grant_permission(req: GrantPermissionRequest, _: bool = Depends(verify
 
     status_str = "granted" if req.granted else "denied"
     if not contact:
-        contact = Contact(identifier=req.contact_identifier, permission_status=status_str)
+        contact = Contact(
+            identifier=req.contact_identifier,
+            permission_status=status_str,
+            permission_requested_at=utc_now(),
+            permission_granted_at=utc_now() if req.granted else None,
+        )
         session.add(contact)
     else:
         contact.permission_status = status_str
+        contact.permission_granted_at = utc_now() if req.granted else None
+
+    session.add(AuditLog(
+        action="permission_update",
+        actor=req.contact_identifier,
+        policy_checked="permission_policy",
+        decision=status_str,
+        reason="Explicit operator permission update",
+        details={"contact_identifier": req.contact_identifier},
+    ))
 
     await session.commit()
     return {"contact_identifier": req.contact_identifier, "permission_status": status_str}
@@ -424,14 +479,26 @@ async def track_click(tracking_id: str, request: Request, session: AsyncSession 
             feedback_notes="User clicked affiliate link"
         )
         session.add(learning_entry)
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            existing_click_stmt = select(Click).options(selectinload(Click.offer)).where(
+                Click.tracking_token == tracking_id
+            )
+            click_model = (await session.execute(existing_click_stmt)).scalar_one_or_none()
+            if not click_model:
+                raise
         await session.refresh(click_model, ["offer"])
 
     return {
         "status": "tracked",
         "tracking_token": tracking_id,
         "click_id": click_model.id,
-        "redirect_url": click_model.offer.url if click_model.offer else "https://example.com/affiliate_destination"
+        "redirect_url": (
+            click_model.offer.affiliate_url or click_model.offer.url
+            if click_model.offer else None
+        )
     }
 
 @router.post("/api/v1/tracking/conversion")
@@ -494,7 +561,18 @@ async def record_conversion(request: Request, req: ConversionRecordRequest, _: b
     )
     session.add(learning_entry)
 
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        existing = (await session.execute(stmt)).scalar_one_or_none()
+        if not existing:
+            raise
+        return {
+            "status": "already_processed",
+            "message": "Conversion event already idempotently recorded",
+            "conversion_id": existing.id
+        }
 
     await learning_service.optimize_source_weights(session)
 

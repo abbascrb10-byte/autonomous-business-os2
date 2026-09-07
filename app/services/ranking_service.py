@@ -27,8 +27,14 @@ class RankingService:
         if price is None or price <= 0:
             return False, "Offer has invalid or non-positive price"
 
-        offer_currency = offer.get("currency", "EUR")
-        shipping_cost = offer.get("shipping_cost") or 0.0
+        offer_currency = offer.get("currency")
+        if not offer_currency:
+            return False, "Offer is missing source currency"
+
+        shipping_cost = offer.get("shipping_cost")
+        if shipping_cost is not None and shipping_cost < 0:
+            return False, "Offer has invalid negative shipping cost"
+        shipping_cost = shipping_cost or 0.0
         total_cost_orig = currency_service.calculate_total_cost(price, shipping_cost)
         total_cost_eur = currency_service.normalize_to_eur(total_cost_orig, offer_currency)
 
@@ -41,6 +47,19 @@ class RankingService:
 
         if not offer.get("availability", True):
             return False, "Offer is currently unavailable"
+
+        freshness_value = offer.get("freshness_timestamp")
+        if freshness_value:
+            try:
+                if isinstance(freshness_value, str):
+                    freshness_value = datetime.fromisoformat(freshness_value.replace("Z", "+00:00"))
+                if freshness_value.tzinfo is None:
+                    freshness_value = freshness_value.replace(tzinfo=timezone.utc)
+                age_hours = (datetime.now(timezone.utc) - freshness_value).total_seconds() / 3600
+                if age_hours > 24:
+                    return False, "Offer is stale"
+            except (TypeError, ValueError):
+                return False, "Offer has invalid freshness timestamp"
 
         return True, "Verified eligible offer"
 
@@ -65,7 +84,7 @@ class RankingService:
 
             offer_price = offer.get("price", budget_max)
             shipping_cost = offer.get("shipping_cost") or 0.0
-            offer_currency = offer.get("currency", "EUR")
+            offer_currency = offer["currency"]
             total_cost_eur = currency_service.normalize_to_eur(currency_service.calculate_total_cost(offer_price, shipping_cost), offer_currency)
 
             if total_cost_eur <= budget_max_eur:

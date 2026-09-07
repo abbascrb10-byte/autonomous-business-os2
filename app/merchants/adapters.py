@@ -101,7 +101,7 @@ class EbayMerchantAdapter(BaseMerchantAdapter):
                             "price": price_val,
                             "currency": curr,
                             "url": item.get("itemWebUrl"),
-                            "affiliate_url": item.get("itemAffiliateWebUrl") or item.get("itemWebUrl"),
+                            "affiliate_url": item.get("itemAffiliateWebUrl"),
                             "availability": True if item.get("itemWebUrl") else False,
                             "seller_name": seller_username,
                             "shipping_cost": shipping_cost,
@@ -161,7 +161,7 @@ class EtsyMerchantAdapter(BaseMerchantAdapter):
                             "price": price_val,
                             "currency": curr,
                             "url": item.get("url"),
-                            "affiliate_url": item.get("url"),
+                            "affiliate_url": None,
                             "availability": item.get("state") == "active",
                             "seller_name": None, # Unmapped unless user shop API requested
                             "shipping_cost": None,

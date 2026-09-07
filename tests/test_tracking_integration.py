@@ -61,6 +61,7 @@ async def test_full_tracking_and_conversion_idempotency_api(monkeypatch):
         click_res = await client.get(f"/api/v1/tracking/click/{token}")
         assert click_res.status_code == 200
         assert click_res.json()["status"] == "tracked"
+        assert click_res.json()["redirect_url"] == "https://example.com/sony-a7-iv"
         click_id = click_res.json()["click_id"]
         assert click_id is not None
 

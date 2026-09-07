@@ -52,7 +52,7 @@ async def node_normalize(state: WorkflowState) -> WorkflowState:
     return state
 
 async def node_deduplicate(state: WorkflowState) -> WorkflowState:
-    state["is_duplicate"] = False
+    state["is_duplicate"] = bool(state.get("is_duplicate", False))
     return state
 
 async def node_intent(state: WorkflowState) -> WorkflowState:
@@ -162,6 +162,9 @@ def route_after_intent(state: WorkflowState) -> str:
         return "product"
     return "END"
 
+def route_after_deduplicate(state: WorkflowState) -> str:
+    return "END" if state.get("is_duplicate", False) else "intent"
+
 def route_after_policy(state: WorkflowState) -> str:
     if state.get("policy_passed", True):
         return "permission"
@@ -187,7 +190,11 @@ def build_gpie_graph() -> StateGraph:
 
     workflow.add_edge("ingest", "normalize")
     workflow.add_edge("normalize", "deduplicate")
-    workflow.add_edge("deduplicate", "intent")
+    workflow.add_conditional_edges(
+        "deduplicate",
+        route_after_deduplicate,
+        {"intent": "intent", "END": END}
+    )
 
     workflow.add_conditional_edges(
         "intent",

@@ -2,6 +2,7 @@ import hmac
 import time
 from typing import Dict, Any, Optional
 from fastapi import Request, HTTPException, status
+from redis import asyncio as aioredis
 from app.config.settings import settings
 import structlog
 
@@ -26,7 +27,9 @@ async def verify_admin_api_key(request: Request):
     if not expected_key:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Admin API key is not configured")
 
-    token = auth_header.replace("Bearer ", "").strip()
+    token = auth_header.strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
     if not hmac.compare_digest(token, expected_key):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
 
@@ -38,6 +41,29 @@ async def check_rate_limit(request: Request, max_requests: int = 60, window_seco
     """
     client_ip = request.client.host if request.client else "127.0.0.1"
     now = time.time()
+
+    try:
+        redis = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=0.5)
+        try:
+            key = f"rate_limit:{client_ip}"
+            request_count = await redis.incr(key)
+            if request_count == 1:
+                await redis.expire(key, window_seconds)
+            if request_count > max_requests:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Rate limit exceeded: Maximum {max_requests} requests per {window_seconds}s"
+                )
+            return
+        finally:
+            await redis.aclose()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if settings.APP_ENV == "production":
+            logger.error("Distributed rate limiter unavailable", error=str(exc))
+            raise HTTPException(status_code=503, detail="Rate limiting service unavailable")
+        logger.warning("Redis rate limiter unavailable; using development fallback", error=str(exc))
 
     requests = rate_limit_store.get(client_ip, [])
     # Remove timestamps older than window
