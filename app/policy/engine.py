@@ -13,7 +13,7 @@ class PolicyEngine:
     Produces auditable decision reasons for all checks.
     """
 
-    ALLOWED_SOURCES = {"owned_api", "authorized_public", "commercial_search"}
+    ALLOWED_SOURCES = {"owned_api", "authorized_public", "commercial_search", "tavily_search"}
 
     def evaluate_source_policy(self, source_type: str, metadata: Dict[str, Any]) -> Tuple[bool, str]:
         if source_type not in self.ALLOWED_SOURCES:
