@@ -448,7 +448,8 @@ async def record_conversion(req: ConversionRecordRequest, session: AsyncSession 
         click_id=click_model.id,
         merchant_id=merchant.id,
         amount=req.amount,
-        currency=req.currency
+        currency=req.currency,
+        merchant_name=req.merchant_name
     )
 
     conv_model = Conversion(
@@ -465,6 +466,7 @@ async def record_conversion(req: ConversionRecordRequest, session: AsyncSession 
     comm_model = Commission(
         conversion_id=conv_model.id,
         amount=conv_data["commission"]["amount"],
+        rate=conv_data["commission"]["rate"],
         currency=req.currency,
         status="approved"
     )

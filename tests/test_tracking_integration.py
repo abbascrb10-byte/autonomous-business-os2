@@ -52,7 +52,7 @@ async def test_full_tracking_and_conversion_idempotency_api():
         conv_res = await client.post("/api/v1/tracking/conversion", json=conv_payload)
         assert conv_res.status_code == 200
         assert conv_res.json()["status"] == "recorded"
-        assert conv_res.json()["commission_earned"] == 72.0
+        assert conv_res.json()["commission_earned"] == 108.0 # 6% for eBay default on 1800
 
         dup_res = await client.post("/api/v1/tracking/conversion", json=conv_payload)
         assert dup_res.status_code == 200

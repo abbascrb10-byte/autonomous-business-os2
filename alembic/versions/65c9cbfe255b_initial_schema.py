@@ -46,6 +46,12 @@ def upgrade() -> None:
         sa.Column('intent_stage', sa.String(length=50), nullable=False),
         sa.Column('scoring_rationale', sa.Text(), nullable=False),
         sa.Column('is_qualified', sa.Boolean(), nullable=False),
+        sa.Column('urgency_score', sa.Integer(), nullable=True),
+        sa.Column('budget_min', sa.Float(), nullable=True),
+        sa.Column('budget_max', sa.Float(), nullable=True),
+        sa.Column('currency', sa.String(length=10), nullable=True),
+        sa.Column('shipping_destination', sa.String(length=100), nullable=True),
+        sa.Column('timeframe', sa.String(length=50), nullable=True),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(['demand_signal_id'], ['demand_signals.id'], ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('id')
@@ -178,6 +184,7 @@ def upgrade() -> None:
         sa.Column('id', sa.String(length=36), nullable=False),
         sa.Column('conversion_id', sa.String(length=36), nullable=False),
         sa.Column('amount', sa.Float(), nullable=False),
+        sa.Column('rate', sa.Float(), nullable=False),
         sa.Column('currency', sa.String(length=10), nullable=False),
         sa.Column('status', sa.String(length=50), nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
@@ -240,8 +247,22 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint('id')
     )
 
+    op.create_table(
+        'source_weights',
+        sa.Column('id', sa.String(length=36), nullable=False),
+        sa.Column('source_name', sa.String(length=50), nullable=False),
+        sa.Column('weight', sa.Float(), nullable=False),
+        sa.Column('conversion_rate', sa.Float(), nullable=False),
+        sa.Column('signals_count', sa.Integer(), nullable=False),
+        sa.Column('conversions_count', sa.Integer(), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('source_name')
+    )
+
 
 def downgrade() -> None:
+    op.drop_table('source_weights')
     op.drop_table('learning_outcomes')
     op.drop_table('audit_logs')
     op.drop_table('agent_runs')

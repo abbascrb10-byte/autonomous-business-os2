@@ -13,14 +13,14 @@ class PolicyEngine:
     Produces auditable decision reasons for all checks.
     """
 
-    ALLOWED_SOURCES = {"owned_api", "authorized_public", "commercial_search", "tavily_search"}
+    ALLOWED_SOURCES = {"owned_api", "authorized_public", "commercial_search", "tavily_search", "reddit", "twitter"}
 
     def evaluate_source_policy(self, source_type: str, metadata: Dict[str, Any]) -> Tuple[bool, str]:
         if source_type not in self.ALLOWED_SOURCES:
             return False, f"Source type '{source_type}' is not authorized by policy."
 
-        if source_type == "authorized_public" and not metadata.get("authorized_feed", False):
-            return False, "Public feed source is missing authorization metadata."
+        if source_type in ("authorized_public", "reddit", "twitter") and not metadata.get("authorized_feed", False):
+            return False, f"{source_type.title()} source is missing authorization metadata."
 
         return True, f"Source '{source_type}' is compliant with ingestion policy."
 
