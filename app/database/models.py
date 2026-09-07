@@ -18,14 +18,14 @@ class DemandSignal(Base):
     __tablename__ = "demand_signals"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    source_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True) # e.g., owned_api, authorized_public, commercial_search
+    source_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     source_id: Mapped[str] = mapped_column(String(100), nullable=False)
     raw_content: Mapped[str] = mapped_column(Text, nullable=False)
     normalized_content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     dedup_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True, unique=True)
     metadata_json: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     contact_identifier: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
-    status: Mapped[str] = mapped_column(String(50), default="ingested", nullable=False) # ingested, processed, duplicate, ignored
+    status: Mapped[str] = mapped_column(String(50), default="ingested", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     intents: Mapped[list["PurchaseIntent"]] = relationship("PurchaseIntent", back_populates="demand_signal", cascade="all, delete-orphan")
@@ -36,10 +36,19 @@ class PurchaseIntent(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
     demand_signal_id: Mapped[str] = mapped_column(String(36), ForeignKey("demand_signals.id", ondelete="CASCADE"), nullable=False)
     has_intent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    confidence_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0) # 0.0 to 1.0
-    intent_stage: Mapped[str] = mapped_column(String(50), nullable=False, default="unqualified") # research, high_intent, ready_to_buy, unqualified
+    confidence_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    intent_stage: Mapped[str] = mapped_column(String(50), nullable=False, default="unqualified")
     scoring_rationale: Mapped[str] = mapped_column(Text, nullable=False)
     is_qualified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    # Enhanced requirement tracking attributes
+    urgency_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    budget_min: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    budget_max: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    currency: Mapped[Optional[str]] = mapped_column(String(10), nullable=True, default="EUR")
+    shipping_destination: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    timeframe: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     demand_signal: Mapped["DemandSignal"] = relationship("DemandSignal", back_populates="intents")
@@ -57,7 +66,7 @@ class ProductRequirement(Base):
     category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     budget_max: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     currency: Mapped[str] = mapped_column(String(10), default="EUR", nullable=False)
-    condition: Mapped[str] = mapped_column(String(50), default="any", nullable=False) # new, used, refurbished, any
+    condition: Mapped[str] = mapped_column(String(50), default="any", nullable=False)
     destination_country: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     shipping_preferences: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     specifications: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
@@ -70,7 +79,7 @@ class Merchant(Base):
     __tablename__ = "merchants"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True) # amazon, ebay
+    name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     credentials_configured: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     commission_rate_estimate: Mapped[float] = mapped_column(Float, default=0.04, nullable=False)
@@ -110,9 +119,9 @@ class Contact(Base):
     __tablename__ = "contacts"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    identifier: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True) # e.g. email, user_id
+    identifier: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
     channel: Mapped[str] = mapped_column(String(50), default="email", nullable=False)
-    permission_status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False) # pending, granted, denied
+    permission_status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)
     permission_requested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     permission_granted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
@@ -126,9 +135,9 @@ class OutreachMessage(Base):
     contact_id: Mapped[str] = mapped_column(String(36), ForeignKey("contacts.id", ondelete="CASCADE"), nullable=False)
     purchase_intent_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("purchase_intents.id", ondelete="SET NULL"), nullable=True)
     offer_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("offers.id", ondelete="SET NULL"), nullable=True)
-    message_type: Mapped[str] = mapped_column(String(50), nullable=False) # permission_request, recommendation
+    message_type: Mapped[str] = mapped_column(String(50), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(String(50), default="awaiting_approval", nullable=False) # draft, awaiting_approval, approved, sent, failed
+    status: Mapped[str] = mapped_column(String(50), default="awaiting_approval", nullable=False)
     delivery_provider: Mapped[str] = mapped_column(String(50), default="local_approval", nullable=False)
     delivery_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
@@ -153,7 +162,7 @@ class Conversion(Base):
     __tablename__ = "conversions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
-    external_conversion_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True) # idempotency key
+    external_conversion_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
     click_id: Mapped[str] = mapped_column(String(36), ForeignKey("clicks.id", ondelete="CASCADE"), nullable=False)
     merchant_id: Mapped[str] = mapped_column(String(36), ForeignKey("merchants.id"), nullable=False)
     amount: Mapped[float] = mapped_column(Float, nullable=False)
@@ -170,8 +179,9 @@ class Commission(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
     conversion_id: Mapped[str] = mapped_column(String(36), ForeignKey("conversions.id", ondelete="CASCADE"), nullable=False, unique=True)
     amount: Mapped[float] = mapped_column(Float, nullable=False)
+    rate: Mapped[float] = mapped_column(Float, default=0.04, nullable=False)
     currency: Mapped[str] = mapped_column(String(10), default="EUR", nullable=False)
-    status: Mapped[str] = mapped_column(String(50), default="approved", nullable=False) # pending, approved, paid
+    status: Mapped[str] = mapped_column(String(50), default="approved", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
 
     conversion: Mapped["Conversion"] = relationship("Conversion", back_populates="commission")
@@ -193,7 +203,7 @@ class AgentRun(Base):
     workflow_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     demand_signal_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     current_node: Mapped[str] = mapped_column(String(50), nullable=False)
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="running") # running, completed, failed
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="running")
     state_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
@@ -206,7 +216,7 @@ class AuditLog(Base):
     action: Mapped[str] = mapped_column(String(100), nullable=False)
     actor: Mapped[str] = mapped_column(String(100), nullable=False, default="system")
     policy_checked: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    decision: Mapped[str] = mapped_column(String(50), nullable=False) # allowed, denied, approval_required
+    decision: Mapped[str] = mapped_column(String(50), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     details: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
@@ -218,7 +228,18 @@ class LearningOutcome(Base):
     purchase_intent_id: Mapped[str] = mapped_column(String(36), ForeignKey("purchase_intents.id", ondelete="CASCADE"), nullable=False)
     offer_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("offers.id", ondelete="SET NULL"), nullable=True)
     merchant_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("merchants.id", ondelete="SET NULL"), nullable=True)
-    event_type: Mapped[str] = mapped_column(String(50), nullable=False) # permission_granted, click, conversion, rejection
+    event_type: Mapped[str] = mapped_column(String(50), nullable=False)
     score_delta: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     feedback_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+
+class SourceWeight(Base):
+    __tablename__ = "source_weights"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    source_name: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    weight: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    conversion_rate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    signals_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    conversions_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False)

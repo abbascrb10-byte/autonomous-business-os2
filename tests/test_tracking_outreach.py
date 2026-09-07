@@ -23,10 +23,10 @@ def test_tracking_and_conversion_calculation():
     url = tracking_service.generate_tracking_url(token)
     assert url.endswith(token)
 
-    conversion = tracking_service.process_conversion("CONV-100", "click_1", "merchant_amz", 1000.0, "EUR")
+    conversion = tracking_service.process_conversion("CONV-100", "click_1", "merchant_amz", 1000.0, "EUR", merchant_name="amazon")
     assert conversion["external_conversion_id"] == "CONV-100"
     assert conversion["amount"] == 1000.0
-    assert conversion["commission"]["amount"] == 40.0 # 4% of 1000
+    assert conversion["commission"]["amount"] == 40.0 # 4% of 1000 for Amazon default
 
 def test_learning_score_delta():
     assert learning_service.calculate_score_adjustment("conversion") == 0.50

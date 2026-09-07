@@ -7,10 +7,9 @@ logger = structlog.get_logger()
 
 class OutreachService:
     """
-    Handles permission-based outreach.
-    First contact: asks permission ("I found an option... Would you like me to send you the link?").
-    Only after permission is granted: generates recommendation outreach message.
-    If no authorized sending provider is configured, holds messages safely at an approval boundary (awaiting_approval).
+    Handles permission-based outreach using a clean two-step flow:
+    Step 1: First contact permission request ("I found an option... Would you like me to send you the link?").
+    Step 2: Recommendation message sent ONLY after permission is explicitly granted.
     """
 
     def generate_permission_request(self, contact_identifier: str, product_name: str) -> Dict[str, Any]:
@@ -50,6 +49,25 @@ class OutreachService:
             "status": "awaiting_approval" if provider == "local_approval" or not settings.OUTREACH_API_KEY else "sent",
             "delivery_provider": provider,
             "delivery_notes": "Held at local approval boundary." if provider == "local_approval" or not settings.OUTREACH_API_KEY else "Dispatched to provider API."
+        }
+
+    async def execute_two_message_flow(self, contact_identifier: str, product_name: str, offer: Dict[str, Any], tracking_url: str, permission_granted: bool = False) -> Dict[str, Any]:
+        """
+        Executes two-message permission flow:
+        Returns permission request if permission_granted is False;
+        Returns recommendation message if permission_granted is True.
+        """
+        if not permission_granted:
+            perm_req = self.generate_permission_request(contact_identifier, product_name)
+            return {
+                "flow_status": "awaiting_permission",
+                "message": perm_req
+            }
+
+        rec_msg = self.generate_recommendation_message(contact_identifier, offer, tracking_url)
+        return {
+            "flow_status": "recommendation_sent",
+            "message": rec_msg
         }
 
 outreach_service = OutreachService()
