@@ -23,8 +23,7 @@ class BaseMerchantAdapter(ABC):
     async def discover_offers(self, requirement: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Discovers offers matching product requirements.
-        When credentials are missing, returns empty list with status CONFIGURATION_REQUIRED
-        without fabricating fake production offers.
+        Distinguishes between NO_RESULTS and API_FAILURE cleanly.
         """
         pass
 
@@ -66,7 +65,7 @@ class EbayMerchantAdapter(BaseMerchantAdapter):
         try:
             token = await self._get_oauth_token()
             if not token:
-                logger.error("Failed to acquire eBay OAuth token")
+                logger.error("Failed to acquire eBay OAuth token", status="API_FAILURE")
                 return []
 
             marketplace_id = getattr(settings, "EBAY_MARKETPLACE_ID", "EBAY_US")
@@ -84,12 +83,15 @@ class EbayMerchantAdapter(BaseMerchantAdapter):
                 res = await client.get(url, headers=headers, params=params)
                 if res.status_code == 200:
                     items = res.json().get("itemSummaries", [])
+                    if not items:
+                        logger.info("eBay query executed: NO_RESULTS", query=product_query)
+                        return []
+
                     results = []
                     for item in items:
                         price_val = float(item.get("price", {}).get("value", 0.0))
                         curr = item.get("price", {}).get("currency", "USD")
 
-                        # Map ONLY fields genuinely returned by eBay
                         seller_username = item.get("seller", {}).get("username")
                         shipping_options = item.get("shippingOptions")
                         shipping_cost = float(shipping_options[0].get("shippingCost", {}).get("value", 0.0)) if shipping_options and shipping_options[0].get("shippingCost") else None
@@ -105,15 +107,15 @@ class EbayMerchantAdapter(BaseMerchantAdapter):
                             "availability": True if item.get("itemWebUrl") else False,
                             "seller_name": seller_username,
                             "shipping_cost": shipping_cost,
-                            "return_policy": None, # None unless explicitly returned
+                            "return_policy": None,
                             "is_test_offer": False,
-                            "is_verified": False # Verified separately by RankingService
+                            "is_verified": False
                         })
                     return results
                 else:
-                    logger.warning("eBay search API error", status_code=res.status_code)
+                    logger.warning("eBay search API error", status="API_FAILURE", status_code=res.status_code)
         except Exception as e:
-            logger.error("eBay API query error", error=str(e))
+            logger.error("eBay API query error", status="API_FAILURE", error=str(e))
 
         return []
 
@@ -147,13 +149,17 @@ class EtsyMerchantAdapter(BaseMerchantAdapter):
                 res = await client.get(url, headers=headers, params=params)
                 if res.status_code == 200:
                     items = res.json().get("results", [])
+                    if not items:
+                        logger.info("Etsy query executed: NO_RESULTS", query=product_query)
+                        return []
+
                     results = []
                     for item in items:
                         price_dict = item.get("price", {})
-                        price_val = float(price_dict.get("amount", 0)) / float(price_dict.get("divisor", 100)) if price_dict.get("divisor") else float(price_dict.get("amount", 0))
+                        divisor = float(price_dict.get("divisor", 100)) if float(price_dict.get("divisor", 100)) > 0 else 100.0
+                        price_val = float(price_dict.get("amount", 0)) / divisor
                         curr = price_dict.get("currency_code", "USD")
 
-                        # Map ONLY real returned fields; do NOT invent fake shop names or generic policies
                         results.append({
                             "merchant_name": self.merchant_name,
                             "title": item.get("title", product_query),
@@ -163,17 +169,17 @@ class EtsyMerchantAdapter(BaseMerchantAdapter):
                             "url": item.get("url"),
                             "affiliate_url": item.get("url"),
                             "availability": item.get("state") == "active",
-                            "seller_name": None, # Unmapped unless user shop API requested
+                            "seller_name": None,
                             "shipping_cost": None,
                             "return_policy": None,
                             "is_test_offer": False,
-                            "is_verified": False # Verified separately by RankingService
+                            "is_verified": False
                         })
                     return results
                 else:
-                    logger.warning("Etsy API error", status_code=res.status_code)
+                    logger.warning("Etsy API error", status="API_FAILURE", status_code=res.status_code)
         except Exception as e:
-            logger.error("Etsy API query error", error=str(e))
+            logger.error("Etsy API query error", status="API_FAILURE", error=str(e))
 
         return []
 
