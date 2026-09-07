@@ -1,5 +1,6 @@
 import re
 import json
+import httpx
 from typing import Dict, Any, Optional, Tuple
 from app.config.settings import settings
 import structlog
@@ -8,49 +9,86 @@ logger = structlog.get_logger()
 
 class LLMProvider:
     """
-    Clean abstraction for LLM-based intelligence supporting OpenAI, Anthropic, Gemini,
-    with a transparent, deterministic fallback path when API credentials are missing.
+    LLM abstraction supporting Ollama (default local open-weight model), Gemini,
+    OpenAI, Anthropic, with a transparent, deterministic fallback path when API credentials/servers are unavailable.
     """
 
     def __init__(self):
-        self.provider = settings.AI_PROVIDER.lower() if settings.AI_PROVIDER else "mock"
-        self.api_key = self._get_api_key()
-        self._is_configured = bool(self.api_key and self.provider != "mock")
+        self.provider = settings.AI_PROVIDER.lower() if settings.AI_PROVIDER else "ollama"
+        self._is_configured = False
         self._llm = None
 
-        if self._is_configured:
-            try:
-                if self.provider == "openai":
-                    from langchain_openai import ChatOpenAI
-                    self._llm = ChatOpenAI(openai_api_key=self.api_key, model="gpt-4o-mini", temperature=0.0)
-                elif self.provider == "anthropic":
-                    from langchain_anthropic import ChatAnthropic
-                    self._llm = ChatAnthropic(anthropic_api_key=self.api_key, model="claude-3-haiku-20240307", temperature=0.0)
-                else:
-                    logger.warning("Unsupported LLM provider or missing library, falling back to deterministic mode", provider=self.provider)
-                    self._is_configured = False
-            except Exception as e:
-                logger.error("Failed to initialize LLM provider, falling back to deterministic mode", error=str(e))
-                self._is_configured = False
+        self._check_and_init_provider()
 
-    def _get_api_key(self) -> Optional[str]:
-        if self.provider == "openai":
-            return settings.OPENAI_API_KEY
-        elif self.provider == "anthropic":
-            return settings.ANTHROPIC_API_KEY
-        elif self.provider == "gemini":
-            return settings.GEMINI_API_KEY
-        return None
+    def _check_and_init_provider(self):
+        if self.provider == "ollama":
+            self._is_configured = True
+        elif self.provider == "openai" and settings.OPENAI_API_KEY:
+            try:
+                from langchain_openai import ChatOpenAI
+                self._llm = ChatOpenAI(openai_api_key=settings.OPENAI_API_KEY, model="gpt-4o-mini", temperature=0.0)
+                self._is_configured = True
+            except Exception:
+                self._is_configured = False
+        elif self.provider == "anthropic" and settings.ANTHROPIC_API_KEY:
+            try:
+                from langchain_anthropic import ChatAnthropic
+                self._llm = ChatAnthropic(anthropic_api_key=settings.ANTHROPIC_API_KEY, model="claude-3-haiku-20240307", temperature=0.0)
+                self._is_configured = True
+            except Exception:
+                self._is_configured = False
+        elif self.provider == "gemini" and settings.GEMINI_API_KEY:
+            self._is_configured = True
+        else:
+            self._is_configured = False
 
     @property
     def is_configured(self) -> bool:
         return self._is_configured
 
+    async def _query_ollama(self, prompt: str) -> Optional[str]:
+        try:
+            url = f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/generate"
+            payload = {
+                "model": settings.OLLAMA_MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.0}
+            }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                res = await client.post(url, json=payload)
+                if res.status_code == 200:
+                    return res.json().get("response")
+        except Exception as e:
+            logger.warning("Ollama server unreachable or call failed, falling back to deterministic mode", error=str(e))
+        return None
+
     async def classify_intent(self, text: str) -> Dict[str, Any]:
         """
-        Classifies purchase intent. Returns structured dict with has_intent, score, stage, rationale, llm_used.
+        Classifies purchase intent using Ollama, Cloud LLM, or deterministic fallback.
         """
-        if self.is_configured and self._llm:
+        if self.provider == "ollama":
+            prompt = (
+                "You are a purchase intent classifier. Analyze the text and output valid JSON with keys:\n"
+                "- has_intent (bool)\n"
+                "- confidence_score (float 0.0 to 1.0)\n"
+                "- intent_stage (string: 'ready_to_buy', 'high_intent', 'research', 'unqualified')\n"
+                "- rationale (string explaining score based on explicit purchase language, urgency, budget, specs)\n\n"
+                f"Text: \"{text}\""
+            )
+            raw_response = await self._query_ollama(prompt)
+            if raw_response:
+                json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+                if json_match:
+                    try:
+                        data = json.loads(json_match.group(0))
+                        data["llm_used"] = True
+                        data["provider"] = "ollama"
+                        return data
+                    except Exception:
+                        pass
+
+        elif self.is_configured and self._llm:
             try:
                 prompt = (
                     "You are a purchase intent classifier. Analyze the text and output valid JSON with keys:\n"
@@ -66,17 +104,46 @@ class LLMProvider:
                 if json_match:
                     data = json.loads(json_match.group(0))
                     data["llm_used"] = True
+                    data["provider"] = self.provider
                     return data
             except Exception as e:
-                logger.warning("LLM classification failed, falling back to deterministic classifier", error=str(e))
+                logger.warning("LLM classification failed", provider=self.provider, error=str(e))
 
         return self._deterministic_classify_intent(text)
 
     async def extract_product_requirements(self, text: str) -> Dict[str, Any]:
         """
-        Extracts structured product requirements from text.
+        Extracts structured product requirements using Ollama, Cloud LLM, or deterministic fallback.
         """
-        if self.is_configured and self._llm:
+        if self.provider == "ollama":
+            prompt = (
+                "You are a product requirement extractor. Extract structured parameters from the input text and output valid JSON with keys:\n"
+                "- product_name (string)\n"
+                "- brand (string or null)\n"
+                "- model (string or null)\n"
+                "- category (string or null)\n"
+                "- budget_max (float or null)\n"
+                "- currency (string e.g. EUR, USD)\n"
+                "- condition (string e.g. new, used, refurbished, any)\n"
+                "- destination_country (string or null)\n"
+                "- shipping_preferences (string or null)\n"
+                "- specifications (object/dict or null)\n"
+                "- urgency (string e.g. immediate, high, normal, low)\n\n"
+                f"Input: \"{text}\""
+            )
+            raw_response = await self._query_ollama(prompt)
+            if raw_response:
+                json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+                if json_match:
+                    try:
+                        data = json.loads(json_match.group(0))
+                        data["llm_used"] = True
+                        data["provider"] = "ollama"
+                        return data
+                    except Exception:
+                        pass
+
+        elif self.is_configured and self._llm:
             try:
                 prompt = (
                     "You are a product requirement extractor. Extract structured parameters from the input text and output valid JSON with keys:\n"
@@ -99,9 +166,10 @@ class LLMProvider:
                 if json_match:
                     data = json.loads(json_match.group(0))
                     data["llm_used"] = True
+                    data["provider"] = self.provider
                     return data
             except Exception as e:
-                logger.warning("LLM extraction failed, falling back to deterministic extractor", error=str(e))
+                logger.warning("LLM extraction failed", provider=self.provider, error=str(e))
 
         return self._deterministic_extract_requirements(text)
 
@@ -109,28 +177,9 @@ class LLMProvider:
         """
         Reasons about offer suitability when deterministic scoring is insufficient.
         """
-        if self.is_configured and self._llm:
-            try:
-                prompt = (
-                    "Evaluate if this offer matches the buyer requirement. Output valid JSON with keys:\n"
-                    "- match_score (float 0.0 to 1.0)\n"
-                    "- reasoning (string)\n\n"
-                    f"Requirement: {json.dumps(requirement)}\n"
-                    f"Offer Title: {offer_title}, Price: {offer_price}\n"
-                )
-                response = await self._llm.ainvoke(prompt)
-                content = response.content if hasattr(response, "content") else str(response)
-                json_match = re.search(r"\{.*\}", content, re.DOTALL)
-                if json_match:
-                    data = json.loads(json_match.group(0))
-                    data["llm_used"] = True
-                    return data
-            except Exception as e:
-                logger.warning("LLM offer reasoning failed, using deterministic evaluation", error=str(e))
-
         return {
             "match_score": self._deterministic_match_score(offer_title, requirement),
-            "reasoning": "Deterministic pattern matching evaluation (LLM not used/configured).",
+            "reasoning": "Deterministic pattern matching evaluation.",
             "llm_used": False
         }
 
@@ -170,13 +219,10 @@ class LLMProvider:
         budget_max = None
         currency = "EUR"
 
-        # Explicit regex searching for currency symbol + amount or amount + currency code/name
-        # e.g., "under €1800", "$1500", "1800 EUR", "1500 USD"
         c_matches = re.findall(r"(€|\$|EUR|USD)\s*(\d+(?:[.,]\d+)?)", text, re.IGNORECASE)
         if not c_matches:
             c_matches = re.findall(r"(\d+(?:[.,]\d+)?)\s*(€|\$|EUR|USD|euros|dollars)", text, re.IGNORECASE)
             if c_matches:
-                # Group 1 is number, Group 2 is symbol/currency
                 for num_str, sym in c_matches:
                     try:
                         val = float(num_str.replace(",", "."))
@@ -191,7 +237,6 @@ class LLMProvider:
                     except Exception:
                         pass
         else:
-            # Group 1 is symbol, Group 2 is number
             for sym, num_str in c_matches:
                 try:
                     val = float(num_str.replace(",", "."))
@@ -206,7 +251,6 @@ class LLMProvider:
                 except Exception:
                     pass
 
-        # Extract condition
         condition = "any"
         if re.search(r"\bnew\b", text, re.IGNORECASE):
             condition = "new"
@@ -215,13 +259,11 @@ class LLMProvider:
         elif re.search(r"\brefurbished\b", text, re.IGNORECASE):
             condition = "refurbished"
 
-        # Extract country
         destination_country = None
         country_match = re.search(r"(?:shipped to|shipping to|in)\s+([A-Z][a-z]+)", text, re.IGNORECASE)
         if country_match:
             destination_country = country_match.group(1).strip()
 
-        # Clean product query
         cleaned_product = text
         remove_patterns = [
             r"i (?:need|want|am looking for) (?:a|an)?",
@@ -240,7 +282,6 @@ class LLMProvider:
         if not cleaned_product:
             cleaned_product = text.strip()
 
-        # Extract brand heuristics
         brand = None
         known_brands = ["Sony", "Canon", "Nikon", "Apple", "Samsung", "Dell", "Lenovo", "Bose", "LG", "ASUS"]
         for b in known_brands:

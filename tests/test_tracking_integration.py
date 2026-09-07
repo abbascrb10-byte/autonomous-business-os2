@@ -33,8 +33,9 @@ async def test_full_tracking_and_conversion_idempotency_api():
             "contact_identifier": "buyer_conv@example.com"
         })
         assert demand_res.status_code == 201
+        token = demand_res.json()["tracking_token"]
+        assert token is not None
 
-        token = "test_tracking_token_123"
         click_res = await client.get(f"/api/v1/tracking/click/{token}")
         assert click_res.status_code == 200
         assert click_res.json()["status"] == "tracked"
@@ -44,7 +45,7 @@ async def test_full_tracking_and_conversion_idempotency_api():
         conv_payload = {
             "external_conversion_id": "EXT-CONV-9999",
             "tracking_token": token,
-            "merchant_name": "amazon",
+            "merchant_name": "ebay",
             "amount": 1800.0,
             "currency": "EUR"
         }

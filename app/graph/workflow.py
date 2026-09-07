@@ -1,9 +1,9 @@
 import uuid
 from typing import TypedDict, List, Dict, Any, Optional
 from langgraph.graph import StateGraph, END
-from app.sources.adapters import owned_adapter, public_adapter, search_adapter
+from app.sources.adapters import owned_adapter, public_adapter, search_adapter, tavily_adapter
 from app.services.intent_service import intent_service
-from app.merchants.adapters import amazon_adapter, ebay_adapter
+from app.merchants.adapters import ebay_adapter, etsy_adapter, amazon_adapter
 from app.services.ranking_service import ranking_service
 from app.policy.engine import policy_engine
 from app.services.outreach_service import outreach_service
@@ -41,6 +41,8 @@ async def node_ingest(state: WorkflowState) -> WorkflowState:
         adapter = public_adapter
     elif stype == "commercial_search":
         adapter = search_adapter
+    elif stype == "tavily_search":
+        adapter = tavily_adapter
     else:
         adapter = owned_adapter
 
@@ -83,10 +85,12 @@ async def node_product(state: WorkflowState) -> WorkflowState:
 
 async def node_offer_discovery(state: WorkflowState) -> WorkflowState:
     req = state.get("product_requirement", {})
-    amz_offers = await amazon_adapter.discover_offers(req)
-    ebay_offers = await ebay_adapter.discover_offers(req)
 
-    all_offers = amz_offers + ebay_offers
+    ebay_offers = await ebay_adapter.discover_offers(req)
+    etsy_offers = await etsy_adapter.discover_offers(req)
+    amz_offers = await amazon_adapter.discover_offers(req)
+
+    all_offers = ebay_offers + etsy_offers + amz_offers
     state["discovered_offers"] = all_offers
     return state
 

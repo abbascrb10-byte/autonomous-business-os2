@@ -29,21 +29,34 @@ class Settings(BaseSettings):
     REDIS_PORT: int = 6379
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # AI Provider
-    AI_PROVIDER: str = "openai"  # openai | anthropic | gemini | mock
+    # AI Providers (Default: Ollama local open-weight model)
+    AI_PROVIDER: str = "ollama"  # ollama | gemini | openai | anthropic | mock
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "llama3.2"
+
+    # Optional cloud LLM providers
+    GEMINI_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
     ANTHROPIC_API_KEY: Optional[str] = None
-    GEMINI_API_KEY: Optional[str] = None
 
-    # Merchant Credentials
+    # Search Integration (Tavily Free Tier)
+    TAVILY_API_KEY: Optional[str] = None
+
+    # Primary Real Commerce Integrations
+    # eBay Browse API & Partner Network
+    EBAY_CLIENT_ID: Optional[str] = None
+    EBAY_CLIENT_SECRET: Optional[str] = None
+    EBAY_CAMPAIGN_ID: Optional[str] = None
+
+    # Etsy Open API v3
+    ETSY_API_KEY: Optional[str] = None
+    ETSY_SHOP_ID: Optional[str] = None
+
+    # Optional Commerce Integration: Amazon
     AMAZON_ASSOCIATE_TAG: Optional[str] = None
     AMAZON_ACCESS_KEY: Optional[str] = None
     AMAZON_SECRET_KEY: Optional[str] = None
     AMAZON_REGION: str = "us-east-1"
-
-    EBAY_CLIENT_ID: Optional[str] = None
-    EBAY_CLIENT_SECRET: Optional[str] = None
-    EBAY_CAMPAIGN_ID: Optional[str] = None
 
     # Outreach
     OUTREACH_PROVIDER: str = "local_approval"  # local_approval | mock | sendgrid | twilio

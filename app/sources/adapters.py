@@ -1,12 +1,17 @@
 import hashlib
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+import httpx
+from app.config.settings import settings
+import structlog
+
+logger = structlog.get_logger()
 
 class BaseSourceAdapter(ABC):
     @property
     @abstractmethod
     def source_type(self) -> str:
-        """Returns source identifier e.g. 'owned_api', 'authorized_public', 'commercial_search'"""
+        """Returns source identifier e.g. 'owned_api', 'authorized_public', 'commercial_search', 'tavily_search'"""
         pass
 
     @abstractmethod
@@ -92,6 +97,66 @@ class SearchIntentAdapter(BaseSourceAdapter):
             }
         }
 
+class TavilySearchAdapter(BaseSourceAdapter):
+    """
+    Search adapter using Tavily Web Search API (Free Tier).
+    Fails gracefully without fabricating results if credentials are missing or quota is exhausted.
+    """
+
+    @property
+    def source_type(self) -> str:
+        return "tavily_search"
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(settings.TAVILY_API_KEY)
+
+    def normalize_demand(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        content = raw_data.get("query") or raw_data.get("search_term") or ""
+        source_id = str(raw_data.get("source_id") or "tavily_default")
+        contact_identifier = raw_data.get("contact_identifier")
+
+        dedup_hash = self.compute_dedup_hash(source_id, content)
+
+        return {
+            "source_type": self.source_type,
+            "source_id": source_id,
+            "raw_content": content,
+            "normalized_content": content.strip(),
+            "dedup_hash": dedup_hash,
+            "contact_identifier": contact_identifier,
+            "metadata_json": {
+                "search_engine": "tavily",
+                "is_configured": self.is_configured,
+                **raw_data.get("metadata", {})
+            }
+        }
+
+    async def execute_web_search(self, query: str) -> Optional[List[Dict[str, Any]]]:
+        if not self.is_configured:
+            logger.info("Tavily API key not configured: search provider unavailable")
+            return None
+
+        try:
+            url = "https://api.tavily.com/search"
+            payload = {
+                "api_key": settings.TAVILY_API_KEY,
+                "query": query,
+                "search_depth": "basic",
+                "include_domains": ["amazon.com", "ebay.com", "etsy.com"]
+            }
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                res = await client.post(url, json=payload)
+                if res.status_code == 200:
+                    return res.json().get("results", [])
+                else:
+                    logger.warning("Tavily API error", status_code=res.status_code)
+        except Exception as e:
+            logger.error("Tavily search execution failed", error=str(e))
+
+        return None
+
 owned_adapter = OwnedDemandAdapter()
 public_adapter = AuthorizedPublicSourceAdapter()
 search_adapter = SearchIntentAdapter()
+tavily_adapter = TavilySearchAdapter()

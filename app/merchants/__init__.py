@@ -1,3 +1,9 @@
-from app.merchants.adapters import amazon_adapter, ebay_adapter, AmazonMerchantAdapter, EbayMerchantAdapter
+from app.merchants.adapters import (
+    ebay_adapter, etsy_adapter, amazon_adapter,
+    EbayMerchantAdapter, EtsyMerchantAdapter, AmazonMerchantAdapter
+)
 
-__all__ = ["amazon_adapter", "ebay_adapter", "AmazonMerchantAdapter", "EbayMerchantAdapter"]
+__all__ = [
+    "ebay_adapter", "etsy_adapter", "amazon_adapter",
+    "EbayMerchantAdapter", "EtsyMerchantAdapter", "AmazonMerchantAdapter"
+]
