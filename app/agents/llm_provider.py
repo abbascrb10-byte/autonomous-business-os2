@@ -1,52 +1,32 @@
 import re
 import json
 import httpx
-from typing import Dict, Any, Optional, Tuple
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional
 from app.config.settings import settings
 import structlog
 
 logger = structlog.get_logger()
 
-class LLMProvider:
-    """
-    LLM abstraction supporting Ollama (default local open-weight model), Gemini,
-    OpenAI, Anthropic, with a transparent, deterministic fallback path when API credentials/servers are unavailable.
-    """
+class BaseLLMClient(ABC):
+    """Common interface for all LLM provider clients."""
 
-    def __init__(self):
-        self.provider = settings.AI_PROVIDER.lower() if settings.AI_PROVIDER else "ollama"
-        self._is_configured = False
-        self._llm = None
+    @abstractmethod
+    async def classify_intent(self, text: str) -> Optional[Dict[str, Any]]:
+        pass
 
-        self._check_and_init_provider()
+    @abstractmethod
+    async def extract_product_requirements(self, text: str) -> Optional[Dict[str, Any]]:
+        pass
 
-    def _check_and_init_provider(self):
-        if self.provider == "ollama":
-            self._is_configured = True
-        elif self.provider == "openai" and settings.OPENAI_API_KEY:
-            try:
-                from langchain_openai import ChatOpenAI
-                self._llm = ChatOpenAI(openai_api_key=settings.OPENAI_API_KEY, model="gpt-4o-mini", temperature=0.0)
-                self._is_configured = True
-            except Exception:
-                self._is_configured = False
-        elif self.provider == "anthropic" and settings.ANTHROPIC_API_KEY:
-            try:
-                from langchain_anthropic import ChatAnthropic
-                self._llm = ChatAnthropic(anthropic_api_key=settings.ANTHROPIC_API_KEY, model="claude-3-haiku-20240307", temperature=0.0)
-                self._is_configured = True
-            except Exception:
-                self._is_configured = False
-        elif self.provider == "gemini" and settings.GEMINI_API_KEY:
-            self._is_configured = True
-        else:
-            self._is_configured = False
+    @abstractmethod
+    async def reason_offer_suitability(self, offer_title: str, offer_price: float, requirement: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        pass
 
-    @property
-    def is_configured(self) -> bool:
-        return self._is_configured
+class OllamaClient(BaseLLMClient):
+    """Client for local Ollama server."""
 
-    async def _query_ollama(self, prompt: str) -> Optional[str]:
+    async def _query(self, prompt: str) -> Optional[str]:
         try:
             url = f"{settings.OLLAMA_BASE_URL.rstrip('/')}/api/generate"
             payload = {
@@ -60,64 +40,202 @@ class LLMProvider:
                 if res.status_code == 200:
                     return res.json().get("response")
         except Exception as e:
-            logger.warning("Ollama server unreachable or call failed, falling back to deterministic mode", error=str(e))
+            logger.warning("Ollama call failed", error=str(e))
         return None
 
-    async def classify_intent(self, text: str) -> Dict[str, Any]:
-        """
-        Classifies purchase intent using Ollama, Cloud LLM, or deterministic fallback.
-        """
-        if self.provider == "ollama":
+    async def classify_intent(self, text: str) -> Optional[Dict[str, Any]]:
+        prompt = (
+            "You are a purchase intent classifier. Analyze the text and output valid JSON with keys:\n"
+            "- has_intent (bool)\n"
+            "- confidence_score (float 0.0 to 1.0)\n"
+            "- intent_stage (string: 'ready_to_buy', 'high_intent', 'research', 'unqualified')\n"
+            "- rationale (string explaining score)\n\n"
+            f"Text: \"{text}\""
+        )
+        resp = await self._query(prompt)
+        if resp:
+            match = re.search(r"\{.*\}", resp, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(0))
+                    data["llm_used"] = True
+                    data["provider"] = "ollama"
+                    return data
+                except Exception:
+                    pass
+        return None
+
+    async def extract_product_requirements(self, text: str) -> Optional[Dict[str, Any]]:
+        prompt = (
+            "You are a product requirement extractor. Extract structured parameters from the text and output valid JSON with keys:\n"
+            "- product_name (string)\n"
+            "- brand (string or null)\n"
+            "- model (string or null)\n"
+            "- category (string or null)\n"
+            "- budget_max (float or null)\n"
+            "- currency (string e.g. EUR, USD)\n"
+            "- condition (string e.g. new, used, refurbished, any)\n"
+            "- destination_country (string or null)\n"
+            "- shipping_preferences (string or null)\n"
+            "- specifications (object/dict or null)\n"
+            "- urgency (string e.g. immediate, high, normal, low)\n\n"
+            f"Input: \"{text}\""
+        )
+        resp = await self._query(prompt)
+        if resp:
+            match = re.search(r"\{.*\}", resp, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(0))
+                    data["llm_used"] = True
+                    data["provider"] = "ollama"
+                    return data
+                except Exception:
+                    pass
+        return None
+
+    async def reason_offer_suitability(self, offer_title: str, offer_price: float, requirement: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        prompt = (
+            "Evaluate if this offer matches the buyer requirement. Output valid JSON with keys:\n"
+            "- match_score (float 0.0 to 1.0)\n"
+            "- reasoning (string)\n\n"
+            f"Requirement: {json.dumps(requirement)}\n"
+            f"Offer Title: {offer_title}, Price: {offer_price}\n"
+        )
+        resp = await self._query(prompt)
+        if resp:
+            match = re.search(r"\{.*\}", resp, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(0))
+                    data["llm_used"] = True
+                    data["provider"] = "ollama"
+                    return data
+                except Exception:
+                    pass
+        return None
+
+class GeminiClient(BaseLLMClient):
+    """Real REST Client for Google Gemini API."""
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    async def _query(self, prompt: str) -> Optional[str]:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"response_mime_type": "application/json"}
+            }
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                res = await client.post(url, json=payload)
+                if res.status_code == 200:
+                    candidates = res.json().get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if parts:
+                            return parts[0].get("text", "")
+                else:
+                    logger.warning("Gemini API HTTP error", status_code=res.status_code)
+        except Exception as e:
+            logger.warning("Gemini API call failed", error=str(e))
+        return None
+
+    async def classify_intent(self, text: str) -> Optional[Dict[str, Any]]:
+        prompt = (
+            "You are a purchase intent classifier. Analyze the text and output valid JSON with keys:\n"
+            "has_intent (bool), confidence_score (float 0.0 to 1.0), intent_stage (ready_to_buy|high_intent|research|unqualified), rationale (string).\n\n"
+            f"Text: \"{text}\""
+        )
+        resp = await self._query(prompt)
+        if resp:
+            match = re.search(r"\{.*\}", resp, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(0))
+                    data["llm_used"] = True
+                    data["provider"] = "gemini"
+                    return data
+                except Exception:
+                    pass
+        return None
+
+    async def extract_product_requirements(self, text: str) -> Optional[Dict[str, Any]]:
+        prompt = (
+            "You are a product requirement extractor. Extract structured parameters from the text and output valid JSON with keys:\n"
+            "product_name (string), brand (string or null), model (string or null), category (string or null), "
+            "budget_max (float or null), currency (EUR|USD), condition (new|used|refurbished|any), "
+            "destination_country (string or null), shipping_preferences (string or null), "
+            "specifications (object or null), urgency (immediate|high|normal|low).\n\n"
+            f"Input: \"{text}\""
+        )
+        resp = await self._query(prompt)
+        if resp:
+            match = re.search(r"\{.*\}", resp, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(0))
+                    data["llm_used"] = True
+                    data["provider"] = "gemini"
+                    return data
+                except Exception:
+                    pass
+        return None
+
+    async def reason_offer_suitability(self, offer_title: str, offer_price: float, requirement: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        prompt = (
+            "Evaluate if this offer matches the buyer requirement. Output valid JSON with keys:\n"
+            "match_score (float 0.0 to 1.0), reasoning (string).\n\n"
+            f"Requirement: {json.dumps(requirement)}\n"
+            f"Offer Title: {offer_title}, Price: {offer_price}\n"
+        )
+        resp = await self._query(prompt)
+        if resp:
+            match = re.search(r"\{.*\}", resp, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(0))
+                    data["llm_used"] = True
+                    data["provider"] = "gemini"
+                    return data
+                except Exception:
+                    pass
+        return None
+
+class LangChainClient(BaseLLMClient):
+    """Wrapper for LangChain ChatOpenAI / ChatAnthropic providers."""
+
+    def __init__(self, llm_instance: Any, provider_name: str):
+        self.llm = llm_instance
+        self.provider_name = provider_name
+
+    async def classify_intent(self, text: str) -> Optional[Dict[str, Any]]:
+        try:
             prompt = (
                 "You are a purchase intent classifier. Analyze the text and output valid JSON with keys:\n"
                 "- has_intent (bool)\n"
                 "- confidence_score (float 0.0 to 1.0)\n"
                 "- intent_stage (string: 'ready_to_buy', 'high_intent', 'research', 'unqualified')\n"
-                "- rationale (string explaining score based on explicit purchase language, urgency, budget, specs)\n\n"
+                "- rationale (string explaining score)\n\n"
                 f"Text: \"{text}\""
             )
-            raw_response = await self._query_ollama(prompt)
-            if raw_response:
-                json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
-                if json_match:
-                    try:
-                        data = json.loads(json_match.group(0))
-                        data["llm_used"] = True
-                        data["provider"] = "ollama"
-                        return data
-                    except Exception:
-                        pass
+            response = await self.llm.ainvoke(prompt)
+            content = response.content if hasattr(response, "content") else str(response)
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                data = json.loads(match.group(0))
+                data["llm_used"] = True
+                data["provider"] = self.provider_name
+                return data
+        except Exception as e:
+            logger.warning("LangChain LLM call failed", provider=self.provider_name, error=str(e))
+        return None
 
-        elif self.is_configured and self._llm:
-            try:
-                prompt = (
-                    "You are a purchase intent classifier. Analyze the text and output valid JSON with keys:\n"
-                    "- has_intent (bool)\n"
-                    "- confidence_score (float 0.0 to 1.0)\n"
-                    "- intent_stage (string: 'ready_to_buy', 'high_intent', 'research', 'unqualified')\n"
-                    "- rationale (string explaining score based on explicit purchase language, urgency, budget, specs)\n\n"
-                    f"Text: \"{text}\""
-                )
-                response = await self._llm.ainvoke(prompt)
-                content = response.content if hasattr(response, "content") else str(response)
-                json_match = re.search(r"\{.*\}", content, re.DOTALL)
-                if json_match:
-                    data = json.loads(json_match.group(0))
-                    data["llm_used"] = True
-                    data["provider"] = self.provider
-                    return data
-            except Exception as e:
-                logger.warning("LLM classification failed", provider=self.provider, error=str(e))
-
-        return self._deterministic_classify_intent(text)
-
-    async def extract_product_requirements(self, text: str) -> Dict[str, Any]:
-        """
-        Extracts structured product requirements using Ollama, Cloud LLM, or deterministic fallback.
-        """
-        if self.provider == "ollama":
+    async def extract_product_requirements(self, text: str) -> Optional[Dict[str, Any]]:
+        try:
             prompt = (
-                "You are a product requirement extractor. Extract structured parameters from the input text and output valid JSON with keys:\n"
+                "You are a product requirement extractor. Extract structured parameters from input text and output valid JSON with keys:\n"
                 "- product_name (string)\n"
                 "- brand (string or null)\n"
                 "- model (string or null)\n"
@@ -131,55 +249,109 @@ class LLMProvider:
                 "- urgency (string e.g. immediate, high, normal, low)\n\n"
                 f"Input: \"{text}\""
             )
-            raw_response = await self._query_ollama(prompt)
-            if raw_response:
-                json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
-                if json_match:
-                    try:
-                        data = json.loads(json_match.group(0))
-                        data["llm_used"] = True
-                        data["provider"] = "ollama"
-                        return data
-                    except Exception:
-                        pass
+            response = await self.llm.ainvoke(prompt)
+            content = response.content if hasattr(response, "content") else str(response)
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                data = json.loads(match.group(0))
+                data["llm_used"] = True
+                data["provider"] = self.provider_name
+                return data
+        except Exception as e:
+            logger.warning("LangChain LLM extraction failed", provider=self.provider_name, error=str(e))
+        return None
 
-        elif self.is_configured and self._llm:
+    async def reason_offer_suitability(self, offer_title: str, offer_price: float, requirement: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        try:
+            prompt = (
+                "Evaluate if this offer matches the buyer requirement. Output valid JSON with keys:\n"
+                "- match_score (float 0.0 to 1.0)\n"
+                "- reasoning (string)\n\n"
+                f"Requirement: {json.dumps(requirement)}\n"
+                f"Offer Title: {offer_title}, Price: {offer_price}\n"
+            )
+            response = await self.llm.ainvoke(prompt)
+            content = response.content if hasattr(response, "content") else str(response)
+            match = re.search(r"\{.*\}", content, re.DOTALL)
+            if match:
+                data = json.loads(match.group(0))
+                data["llm_used"] = True
+                data["provider"] = self.provider_name
+                return data
+        except Exception as e:
+            logger.warning("LangChain LLM reasoning failed", provider=self.provider_name, error=str(e))
+        return None
+
+class LLMProvider:
+    """
+    Unified LLM abstraction supporting Ollama (default local open-weight model), Gemini,
+    OpenAI, Anthropic, with transparent, deterministic fallback when API credentials/servers are unavailable.
+    """
+
+    def __init__(self):
+        self.provider = settings.AI_PROVIDER.lower() if settings.AI_PROVIDER else "ollama"
+        self._is_configured = False
+        self._client: Optional[BaseLLMClient] = None
+
+        self._check_and_init_provider()
+
+    def _check_and_init_provider(self):
+        if self.provider == "ollama":
+            self._client = OllamaClient()
+            self._is_configured = True
+        elif self.provider == "gemini" and settings.GEMINI_API_KEY:
+            self._client = GeminiClient(api_key=settings.GEMINI_API_KEY)
+            self._is_configured = True
+        elif self.provider == "openai" and settings.OPENAI_API_KEY:
             try:
-                prompt = (
-                    "You are a product requirement extractor. Extract structured parameters from the input text and output valid JSON with keys:\n"
-                    "- product_name (string)\n"
-                    "- brand (string or null)\n"
-                    "- model (string or null)\n"
-                    "- category (string or null)\n"
-                    "- budget_max (float or null)\n"
-                    "- currency (string e.g. EUR, USD)\n"
-                    "- condition (string e.g. new, used, refurbished, any)\n"
-                    "- destination_country (string or null)\n"
-                    "- shipping_preferences (string or null)\n"
-                    "- specifications (object/dict or null)\n"
-                    "- urgency (string e.g. immediate, high, normal, low)\n\n"
-                    f"Input: \"{text}\""
-                )
-                response = await self._llm.ainvoke(prompt)
-                content = response.content if hasattr(response, "content") else str(response)
-                json_match = re.search(r"\{.*\}", content, re.DOTALL)
-                if json_match:
-                    data = json.loads(json_match.group(0))
-                    data["llm_used"] = True
-                    data["provider"] = self.provider
-                    return data
+                from langchain_openai import ChatOpenAI
+                llm = ChatOpenAI(openai_api_key=settings.OPENAI_API_KEY, model="gpt-4o-mini", temperature=0.0)
+                self._client = LangChainClient(llm, "openai")
+                self._is_configured = True
             except Exception as e:
-                logger.warning("LLM extraction failed", provider=self.provider, error=str(e))
+                logger.warning("Failed to initialize OpenAI client", error=str(e))
+                self._is_configured = False
+        elif self.provider == "anthropic" and settings.ANTHROPIC_API_KEY:
+            try:
+                from langchain_anthropic import ChatAnthropic
+                llm = ChatAnthropic(anthropic_api_key=settings.ANTHROPIC_API_KEY, model="claude-3-haiku-20240307", temperature=0.0)
+                self._client = LangChainClient(llm, "anthropic")
+                self._is_configured = True
+            except Exception as e:
+                logger.warning("Failed to initialize Anthropic client", error=str(e))
+                self._is_configured = False
+        else:
+            self._is_configured = False
+
+    @property
+    def is_configured(self) -> bool:
+        return self._is_configured
+
+    async def classify_intent(self, text: str) -> Dict[str, Any]:
+        if self._client:
+            res = await self._client.classify_intent(text)
+            if res:
+                return res
+
+        return self._deterministic_classify_intent(text)
+
+    async def extract_product_requirements(self, text: str) -> Dict[str, Any]:
+        if self._client:
+            res = await self._client.extract_product_requirements(text)
+            if res:
+                return res
 
         return self._deterministic_extract_requirements(text)
 
     async def reason_offer_suitability(self, offer_title: str, offer_price: float, requirement: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Reasons about offer suitability when deterministic scoring is insufficient.
-        """
+        if self._client:
+            res = await self._client.reason_offer_suitability(offer_title, offer_price, requirement)
+            if res:
+                return res
+
         return {
             "match_score": self._deterministic_match_score(offer_title, requirement),
-            "reasoning": "Deterministic pattern matching evaluation.",
+            "reasoning": "Deterministic pattern matching evaluation (LLM unavailable/unconfigured).",
             "llm_used": False
         }
 
@@ -195,7 +367,7 @@ class LLMProvider:
             has_intent = True
             score = min(0.95, 0.60 + (match_count * 0.10) + (0.10 if has_urgency else 0.0))
             stage = "ready_to_buy" if score >= 0.8 else "high_intent"
-            rationale = f"Deterministic rule: detected {match_count} purchase indicators (e.g., budget/explicit buy terms)."
+            rationale = f"Deterministic rule: detected {match_count} purchase indicators."
         elif match_count >= 1:
             has_intent = True
             score = 0.55
@@ -289,12 +461,22 @@ class LLMProvider:
                 brand = b
                 break
 
+        # Extract model heuristic (e.g., A7 IV, XPS 15)
+        model = None
+        model_match = re.search(r"\b([A-Z0-9]{2,}\s+[IVX0-9]+)\b", text, re.IGNORECASE)
+        if model_match:
+            model = model_match.group(1).strip()
+
+        urgency = "normal"
+        if re.search(r"\b(immediately|asap|today|urgent)\b", text, re.IGNORECASE):
+            urgency = "immediate"
+
         category = "electronics"
 
         return {
             "product_name": cleaned_product,
             "brand": brand,
-            "model": None,
+            "model": model,
             "category": category,
             "budget_max": budget_max,
             "currency": currency,
@@ -302,7 +484,7 @@ class LLMProvider:
             "destination_country": destination_country,
             "shipping_preferences": None,
             "specifications": {},
-            "urgency": "normal",
+            "urgency": urgency,
             "llm_used": False
         }
 

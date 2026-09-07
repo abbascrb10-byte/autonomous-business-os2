@@ -38,8 +38,12 @@ class RedisWorkerManager:
                 pass
         return True
 
-    async def enqueue_job(self, queue_name: str, payload: Dict[str, Any]) -> str:
+    async def enqueue_job(self, queue_name: str, payload: Dict[str, Any], max_retries: int = 3) -> str:
         job_id = payload.get("job_id") or payload.get("workflow_id") or "job_default"
+        payload["job_id"] = job_id
+        payload["retries"] = payload.get("retries", 0)
+        payload["max_retries"] = max_retries
+
         redis = await self.get_redis()
         if redis:
             try:
@@ -51,30 +55,48 @@ class RedisWorkerManager:
 
     async def process_job_payload(self, queue_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Executes actual background worker tasks (demand ingestion, intent processing, offer discovery, conversion tracking).
+        Executes background worker tasks (demand ingestion, intent processing, offer discovery, conversion tracking)
+        with error handling and retry logic.
         """
-        logger.info("Worker processing job", queue=queue_name, job_id=payload.get("job_id"))
-        if queue_name == "demand_ingestion":
-            from app.sources.adapters import owned_adapter
-            res = owned_adapter.normalize_demand(payload)
-            return {"status": "processed", "data": res}
-        elif queue_name == "intent_processing":
-            from app.services.intent_service import intent_service
-            res = await intent_service.analyze_and_extract(payload.get("text", ""))
-            return {"status": "processed", "data": res}
-        elif queue_name == "offer_discovery":
-            from app.merchants.adapters import amazon_adapter
-            res = await amazon_adapter.discover_offers(payload)
-            return {"status": "processed", "offers": res}
-        elif queue_name == "conversion_processing":
-            from app.services.tracking_service import tracking_service
-            res = tracking_service.process_conversion(
-                payload.get("external_conversion_id", "EXT-1"),
-                payload.get("click_id", "CLK-1"),
-                payload.get("merchant_id", "M-1"),
-                payload.get("amount", 100.0)
-            )
-            return {"status": "processed", "conversion": res}
+        job_id = payload.get("job_id", "unknown")
+        logger.info("Worker processing job", queue=queue_name, job_id=job_id)
+        try:
+            if queue_name == "demand_ingestion":
+                from app.sources.adapters import owned_adapter
+                res = owned_adapter.normalize_demand(payload)
+                return {"status": "processed", "data": res}
+            elif queue_name == "intent_processing":
+                from app.services.intent_service import intent_service
+                res = await intent_service.analyze_and_extract(payload.get("text", ""))
+                return {"status": "processed", "data": res}
+            elif queue_name == "offer_discovery":
+                from app.merchants.adapters import ebay_adapter
+                res = await ebay_adapter.discover_offers(payload)
+                return {"status": "processed", "offers": res}
+            elif queue_name == "conversion_processing":
+                from app.services.tracking_service import tracking_service
+                res = tracking_service.process_conversion(
+                    payload.get("external_conversion_id", "EXT-1"),
+                    payload.get("click_id", "CLK-1"),
+                    payload.get("merchant_id", "M-1"),
+                    payload.get("amount", 100.0)
+                )
+                return {"status": "processed", "conversion": res}
+        except Exception as e:
+            retries = payload.get("retries", 0) + 1
+            max_retries = payload.get("max_retries", 3)
+            logger.error("Error processing worker job", queue=queue_name, job_id=job_id, retry=retries, error=str(e))
+            if retries < max_retries:
+                payload["retries"] = retries
+                redis = await self.get_redis()
+                if redis:
+                    await redis.rpush(f"queue:{queue_name}", json.dumps(payload))
+            else:
+                logger.error("Job exceeded max retries, sending to dead-letter queue", queue=queue_name, job_id=job_id)
+                redis = await self.get_redis()
+                if redis:
+                    await redis.rpush(f"dlq:{queue_name}", json.dumps(payload))
+            return {"status": "failed", "error": str(e)}
 
         return {"status": "completed", "payload": payload}
 
