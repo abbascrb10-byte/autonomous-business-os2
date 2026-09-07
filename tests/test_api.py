@@ -4,6 +4,7 @@ from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from app.main import app
 from app.database.session import Base, get_db_session
+from app.config.settings import settings
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -36,6 +37,21 @@ async def test_readiness_check_endpoint():
         res = await client.get("/readiness")
         assert res.status_code == 200
         assert "database" in res.json()
+
+@pytest.mark.asyncio
+async def test_sensitive_routes_require_admin_key_in_production(monkeypatch):
+    monkeypatch.setattr(settings, "APP_ENV", "production")
+    monkeypatch.setattr(settings, "ADMIN_API_KEY", "test-admin-key")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        missing = await client.get("/api/v1/offers")
+        assert missing.status_code == 401
+
+        invalid = await client.get("/api/v1/offers", headers={"X-API-Key": "wrong-key"})
+        assert invalid.status_code == 403
+
+        valid = await client.get("/api/v1/offers", headers={"X-API-Key": "test-admin-key"})
+        assert valid.status_code == 200
 
 @pytest.mark.asyncio
 async def test_submit_demand_workflow():

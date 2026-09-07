@@ -40,22 +40,12 @@ def do_run_migrations(connection: Connection) -> None:
 
 def run_migrations_online() -> None:
     db_url = settings.SYNC_DATABASE_URL
+    connectable = create_engine(db_url, poolclass=pool.NullPool)
     try:
-        connectable = create_engine(db_url, poolclass=pool.NullPool)
         with connectable.connect() as connection:
             do_run_migrations(connection)
+    finally:
         connectable.dispose()
-    except Exception as e:
-        print(f"Online DB connection failed ({e}), generating offline/autogenerate metadata.")
-        dialect_name = "postgresql"
-        mc = context.configure(
-            dialect_name=dialect_name,
-            target_metadata=target_metadata,
-            render_as_batch=True,
-            as_sql=False
-        )
-        # Context is set for autogenerate
-        return
 
 if context.is_offline_mode():
     run_migrations_offline()

@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from app.database.session import get_db_session
@@ -19,9 +20,8 @@ from app.analytics.service import analytics_service
 from app.learning.service import learning_service
 from app.policy.engine import policy_engine
 from app.agents.llm_provider import llm_provider
-from app.merchants.adapters import amazon_adapter, ebay_adapter
+from app.merchants.adapters import amazon_adapter, ebay_adapter, etsy_adapter
 from app.sources.registry import source_registry
-from app.workers.manager import worker_manager
 from app.api.auth import check_rate_limit, verify_admin_api_key
 
 router = APIRouter()
@@ -51,7 +51,11 @@ async def _get_or_create_merchant(session: AsyncSession, merchant_name: str) -> 
     stmt = select(Merchant).where(Merchant.name == merchant_name)
     merchant = (await session.execute(stmt)).scalar_one_or_none()
     if not merchant:
-        is_conf = (merchant_name == "amazon" and amazon_adapter.is_configured) or (merchant_name == "ebay" and ebay_adapter.is_configured)
+        is_conf = (
+            (merchant_name == "amazon" and amazon_adapter.is_configured)
+            or (merchant_name == "ebay" and ebay_adapter.is_configured)
+            or (merchant_name == "etsy" and etsy_adapter.is_configured)
+        )
         merchant = Merchant(name=merchant_name, is_active=True, credentials_configured=is_conf)
         session.add(merchant)
         await session.flush()
@@ -131,10 +135,7 @@ async def submit_demand(request: Request, req: DemandIngestRequest, session: Asy
     contact = (await session.execute(stmt_contact)).scalar_one_or_none()
     current_permission = contact.permission_status if contact else "pending"
 
-    # 3. Enqueue job for background processing
-    await worker_manager.enqueue_job("demand_ingestion", norm_preview)
-
-    # 4. Run LangGraph workflow with permission_status state
+    # Run the workflow exactly once; background processing is handled separately.
     wf_id = str(uuid.uuid4())
     initial_state = {
         "workflow_id": wf_id,
@@ -172,7 +173,13 @@ async def submit_demand(request: Request, req: DemandIngestRequest, session: Asy
         confidence_score=intent_data.get("confidence_score", 0.0),
         intent_stage=intent_data.get("intent_stage", "unqualified"),
         scoring_rationale=intent_data.get("scoring_rationale", "N/A"),
-        is_qualified=intent_data.get("is_qualified", False)
+        is_qualified=intent_data.get("is_qualified", False),
+        urgency_score=intent_data.get("urgency_score"),
+        budget_min=intent_data.get("budget_min"),
+        budget_max=intent_data.get("budget_max"),
+        currency=intent_data.get("currency", "EUR"),
+        shipping_destination=intent_data.get("shipping_destination"),
+        timeframe=intent_data.get("timeframe")
     )
     session.add(intent_model)
     await session.flush()
@@ -190,6 +197,7 @@ async def submit_demand(request: Request, req: DemandIngestRequest, session: Asy
             condition=prod_req.get("condition", "any"),
             destination_country=prod_req.get("destination_country"),
             shipping_preferences=prod_req.get("shipping_preferences"),
+            specifications=prod_req.get("specifications"),
             urgency=prod_req.get("urgency", "normal")
         )
         session.add(prod_model)
@@ -233,10 +241,12 @@ async def submit_demand(request: Request, req: DemandIngestRequest, session: Asy
         await session.flush()
 
     perm_msg_data = final_state.get("permission_message")
-    tracking_token = final_state.get("tracking_token") or tracking_service.generate_click_token(
-        winning_offer_model.id if winning_offer_model else "off_1",
-        intent_model.id
-    )
+    tracking_token = None
+    if winning_offer_model:
+        tracking_token = final_state.get("tracking_token") or tracking_service.generate_click_token(
+            winning_offer_model.id,
+            intent_model.id
+        )
 
     if perm_msg_data:
         outreach_model = OutreachMessage(
@@ -247,7 +257,7 @@ async def submit_demand(request: Request, req: DemandIngestRequest, session: Asy
             content=perm_msg_data.get("content", ""),
             status=perm_msg_data.get("status", "awaiting_approval"),
             delivery_provider=perm_msg_data.get("delivery_provider", "local_approval"),
-            delivery_notes=f"Tracking token: {tracking_token}"
+            delivery_notes=f"Tracking token: {tracking_token}" if tracking_token else None
         )
         session.add(outreach_model)
 
@@ -263,7 +273,19 @@ async def submit_demand(request: Request, req: DemandIngestRequest, session: Asy
         }
     )
     session.add(agent_run)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        existing_demand = (await session.execute(dedup_stmt)).scalar_one_or_none()
+        if not existing_demand:
+            raise
+        return {
+            "workflow_id": existing_demand.id,
+            "status": "duplicate",
+            "message": "Demand signal already idempotently processed in GPIE",
+            "dedup_hash": dedup_hash
+        }
 
     response_winning_offer = None
     if contact.permission_status == "granted" and final_state.get("winning_offer"):
@@ -281,7 +303,7 @@ async def submit_demand(request: Request, req: DemandIngestRequest, session: Asy
     }
 
 @router.get("/api/v1/intents/{intent_id}")
-async def get_purchase_intent(intent_id: str, session: AsyncSession = Depends(get_db_session)):
+async def get_purchase_intent(intent_id: str, _: bool = Depends(verify_admin_api_key), session: AsyncSession = Depends(get_db_session)):
     stmt = select(PurchaseIntent).where(PurchaseIntent.id == intent_id)
     res = (await session.execute(stmt)).scalar_one_or_none()
     if not res:
@@ -298,7 +320,7 @@ async def get_purchase_intent(intent_id: str, session: AsyncSession = Depends(ge
     }
 
 @router.get("/api/v1/offers")
-async def inspect_offers(intent_id: Optional[str] = None, session: AsyncSession = Depends(get_db_session)):
+async def inspect_offers(intent_id: Optional[str] = None, _: bool = Depends(verify_admin_api_key), session: AsyncSession = Depends(get_db_session)):
     query = select(Offer)
     if intent_id:
         query = query.where(Offer.purchase_intent_id == intent_id)
@@ -320,7 +342,7 @@ async def inspect_offers(intent_id: Optional[str] = None, session: AsyncSession 
     ]
 
 @router.post("/api/v1/permission/grant")
-async def grant_permission(req: GrantPermissionRequest, session: AsyncSession = Depends(get_db_session)):
+async def grant_permission(req: GrantPermissionRequest, _: bool = Depends(verify_admin_api_key), session: AsyncSession = Depends(get_db_session)):
     stmt = select(Contact).where(Contact.identifier == req.contact_identifier)
     contact = (await session.execute(stmt)).scalar_one_or_none()
 
@@ -335,7 +357,7 @@ async def grant_permission(req: GrantPermissionRequest, session: AsyncSession = 
     return {"contact_identifier": req.contact_identifier, "permission_status": status_str}
 
 @router.get("/api/v1/outreach/messages")
-async def list_outreach_messages(session: AsyncSession = Depends(get_db_session)):
+async def list_outreach_messages(_: bool = Depends(verify_admin_api_key), session: AsyncSession = Depends(get_db_session)):
     stmt = select(OutreachMessage)
     res = (await session.execute(stmt)).scalars().all()
     return [
@@ -369,40 +391,13 @@ async def track_click(tracking_id: str, request: Request, session: AsyncSession 
                 target_offer_id = state_data.get("winning_offer_id")
                 break
 
-        if target_offer_id:
-            offer_stmt = select(Offer).where(Offer.id == target_offer_id)
-            latest_offer = (await session.execute(offer_stmt)).scalar_one_or_none()
-        else:
-            offer_stmt = select(Offer).order_by(Offer.created_at.desc())
-            latest_offer = (await session.execute(offer_stmt)).scalars().first()
+        if not target_offer_id:
+            raise HTTPException(status_code=404, detail="Tracking token not found")
 
+        offer_stmt = select(Offer).where(Offer.id == target_offer_id)
+        latest_offer = (await session.execute(offer_stmt)).scalar_one_or_none()
         if not latest_offer:
-            dummy_merchant = await _get_or_create_merchant(session, "ebay")
-            dummy_intent = PurchaseIntent(
-                demand_signal_id=str(uuid.uuid4()),
-                has_intent=True,
-                confidence_score=0.9,
-                intent_stage="ready_to_buy",
-                scoring_rationale="Tracked click offer",
-                is_qualified=True
-            )
-            session.add(dummy_intent)
-            await session.flush()
-
-            latest_offer = Offer(
-                purchase_intent_id=dummy_intent.id,
-                merchant_id=dummy_merchant.id,
-                title="Tracked Listing Offer",
-                external_product_id=f"EXT-TRK-{uuid.uuid4().hex[:8]}",
-                price=100.0,
-                currency="EUR",
-                url="https://example.com/tracked_item",
-                availability=True,
-                is_verified=True,
-                is_test_offer=True
-            )
-            session.add(latest_offer)
-            await session.flush()
+            raise HTTPException(status_code=404, detail="Tracking token target offer not found")
 
         click_model = Click(
             tracking_token=tracking_id,
@@ -433,7 +428,7 @@ async def track_click(tracking_id: str, request: Request, session: AsyncSession 
     }
 
 @router.post("/api/v1/tracking/conversion")
-async def record_conversion(request: Request, req: ConversionRecordRequest, session: AsyncSession = Depends(get_db_session)):
+async def record_conversion(request: Request, req: ConversionRecordRequest, _: bool = Depends(verify_admin_api_key), session: AsyncSession = Depends(get_db_session)):
     await check_rate_limit(request)
 
     stmt = select(Conversion).where(Conversion.external_conversion_id == req.external_conversion_id)
@@ -447,10 +442,6 @@ async def record_conversion(request: Request, req: ConversionRecordRequest, sess
 
     click_stmt = select(Click).where(Click.tracking_token == req.tracking_token)
     click_model = (await session.execute(click_stmt)).scalar_one_or_none()
-
-    if not click_model:
-        click_stmt_alt = select(Click).order_by(Click.clicked_at.desc())
-        click_model = (await session.execute(click_stmt_alt)).scalars().first()
 
     if not click_model:
         raise HTTPException(status_code=404, detail=f"Invalid conversion request: Tracking token '{req.tracking_token}' not found.")
@@ -507,9 +498,9 @@ async def record_conversion(request: Request, req: ConversionRecordRequest, sess
     }
 
 @router.get("/api/v1/analytics/funnel")
-async def get_analytics_funnel(session: AsyncSession = Depends(get_db_session)):
+async def get_analytics_funnel(_: bool = Depends(verify_admin_api_key), session: AsyncSession = Depends(get_db_session)):
     return await analytics_service.get_funnel_metrics(session)
 
 @router.get("/api/v1/learning/metrics")
-async def get_learning_metrics(session: AsyncSession = Depends(get_db_session)):
+async def get_learning_metrics(_: bool = Depends(verify_admin_api_key), session: AsyncSession = Depends(get_db_session)):
     return await learning_service.get_learning_summary(session)

@@ -1,3 +1,4 @@
+import hmac
 import time
 from typing import Dict, Any, Optional
 from fastapi import Request, HTTPException, status
@@ -14,16 +15,19 @@ async def verify_admin_api_key(request: Request):
     Enforces API key authentication for sensitive operator/admin endpoints.
     """
     auth_header = request.headers.get("Authorization") or request.headers.get("X-API-Key")
-    expected_key = getattr(settings, "ADMIN_API_KEY", settings.SECRET_KEY)
+    expected_key = settings.ADMIN_API_KEY
 
     if not auth_header:
         # In development mode without strict key configured, allow request
-        if settings.APP_ENV == "development":
+        if settings.APP_ENV == "development" and not expected_key:
             return True
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API authentication key")
 
+    if not expected_key:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Admin API key is not configured")
+
     token = auth_header.replace("Bearer ", "").strip()
-    if token != expected_key:
+    if not hmac.compare_digest(token, expected_key):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key")
 
     return True

@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"
     SECRET_KEY: str = "dev_secret_key_change_in_production"
+    ADMIN_API_KEY: Optional[str] = None
 
     # Database
     POSTGRES_USER: str = "gpie"
@@ -41,6 +42,11 @@ class Settings(BaseSettings):
 
     # Search Integration (Tavily Free Tier)
     TAVILY_API_KEY: Optional[str] = None
+
+    # Demand Sources
+    REDDIT_CLIENT_ID: Optional[str] = None
+    REDDIT_CLIENT_SECRET: Optional[str] = None
+    TWITTER_BEARER_TOKEN: Optional[str] = None
 
     # Primary Real Commerce Integrations
     # eBay Browse API & Partner Network

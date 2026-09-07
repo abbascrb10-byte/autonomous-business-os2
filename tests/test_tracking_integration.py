@@ -4,6 +4,7 @@ from httpx import AsyncClient, ASGITransport
 from app.main import app
 from app.database.session import Base, get_db_session
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from app.merchants.adapters import ebay_adapter
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -24,7 +25,22 @@ async def prepare_database():
         await conn.run_sync(Base.metadata.drop_all)
 
 @pytest.mark.asyncio
-async def test_full_tracking_and_conversion_idempotency_api():
+async def test_full_tracking_and_conversion_idempotency_api(monkeypatch):
+    async def discover_test_offers(requirement):
+        return [{
+            "merchant_name": "ebay",
+            "title": "Sony A7 IV Body",
+            "external_product_id": "TEST-SONY-A7-IV",
+            "price": 1750.0,
+            "currency": "EUR",
+            "url": "https://example.com/sony-a7-iv",
+            "availability": True,
+            "seller_name": "Test Seller",
+            "is_verified": True,
+            "is_test_offer": True
+        }]
+
+    monkeypatch.setattr(ebay_adapter, "discover_offers", discover_test_offers)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # Grant permission first to unmask winning offer and ensure offer creation
         await client.post("/api/v1/permission/grant", json={"contact_identifier": "buyer_conv@example.com", "granted": True})
@@ -67,3 +83,18 @@ async def test_full_tracking_and_conversion_idempotency_api():
         learning_res = await client.get("/api/v1/learning/metrics")
         assert learning_res.status_code == 200
         assert learning_res.json()["total_learning_events"] >= 1
+
+@pytest.mark.asyncio
+async def test_unknown_tracking_token_is_rejected():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        click_res = await client.get("/api/v1/tracking/click/unknown-token")
+        assert click_res.status_code == 404
+
+        conversion_res = await client.post("/api/v1/tracking/conversion", json={
+            "external_conversion_id": "EXT-UNKNOWN-TOKEN",
+            "tracking_token": "unknown-token",
+            "merchant_name": "ebay",
+            "amount": 10.0,
+            "currency": "EUR"
+        })
+        assert conversion_res.status_code == 404

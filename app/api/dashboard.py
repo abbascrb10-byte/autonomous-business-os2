@@ -6,11 +6,12 @@ from sqlalchemy import select, func
 from app.database.session import get_db_session
 from app.database.models import DemandSignal, PurchaseIntent, Offer, OutreachMessage, Conversion, Commission, AgentRun, LearningOutcome, SourceWeight
 from app.learning.service import learning_service
+from app.api.auth import verify_admin_api_key
 
 router = APIRouter()
 
 @router.get("/api/v1/dashboard/stats")
-async def get_dashboard_stats(session: AsyncSession = Depends(get_db_session)):
+async def get_dashboard_stats(_: bool = Depends(verify_admin_api_key), session: AsyncSession = Depends(get_db_session)):
     """
     Exposes real system health, demand signals, purchase intents, offers, conversions,
     commissions, and learning metrics for the frontend dashboard.
