@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -41,7 +43,7 @@ services:
       - DATABASE_URL=postgresql+asyncpg://gpie:gpie_password@postgres:5432/gpie_db
       - SYNC_DATABASE_URL=postgresql://gpie:gpie_password@postgres:5432/gpie_db
       - REDIS_URL=redis://redis:6379/0
-      - AI_PROVIDER=openai
+      - AI_PROVIDER=ollama
       - OUTREACH_PROVIDER=local_approval
     depends_on:
       postgres:

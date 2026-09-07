@@ -19,3 +19,5 @@ structlog>=24.1.0
 python-dotenv>=1.0.1
 aiosqlite>=0.20.0
 rapidfuzz>=3.0.0
+asyncpraw>=7.7.0
+tweepy>=4.14.0
