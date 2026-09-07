@@ -13,13 +13,15 @@ rate_limit_store: Dict[str, list] = {}
 async def verify_admin_api_key(request: Request):
     """
     Enforces API key authentication across all sensitive and administrative endpoints.
+    Reconciles development fallback and strict production verification.
     """
     auth_header = request.headers.get("Authorization") or request.headers.get("X-API-Key")
     expected_key = getattr(settings, "ADMIN_API_KEY", None) or settings.SECRET_KEY
 
-    # In development mode, if no header is provided and non-default key isn't set, allow request
+    # If no auth header is provided:
     if not auth_header:
-        if settings.APP_ENV == "development" and settings.SECRET_KEY.startswith("dev_"):
+        # Allow headerless request ONLY in local development when default dev key is active
+        if settings.APP_ENV == "development" and str(settings.SECRET_KEY).startswith("dev_"):
             return True
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API authentication key")
 
@@ -35,7 +37,6 @@ async def check_rate_limit(request: Request, max_requests: int = 60, window_seco
     """
     client_ip = request.client.host if request.client else "127.0.0.1"
 
-    # Try Redis rate limit first
     try:
         redis = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=1)
         key = f"rate_limit:{client_ip}"
@@ -55,7 +56,6 @@ async def check_rate_limit(request: Request, max_requests: int = 60, window_seco
     except Exception:
         pass
 
-    # In-memory fallback
     now = time.time()
     requests = rate_limit_store.get(client_ip, [])
     requests = [ts for ts in requests if now - ts < window_seconds]
